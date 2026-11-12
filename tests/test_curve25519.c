@@ -335,7 +335,7 @@ START_TEST(test_curve25519_large_signatures)
     result = curve_generate_key_pair(global_context, &keys);
     ck_assert_int_eq(result, 0);
 
-    uint8_t message[1048576];
+    static uint8_t message[1048576];
     memset(message, 0, sizeof(message));
 
     signal_buffer *signature = 0;
