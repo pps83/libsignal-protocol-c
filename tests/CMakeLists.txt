@@ -44,7 +44,7 @@ set(common_SRCS
 	test_common.h
 )
 
-include_directories(. ../src)
+include_directories(. ../src ${PROTOBUF_SOURCE_DIR} ${PROTOBUF_SOURCE_DIR}/third_party/utf8_range)
 
 IF(APPLE AND ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 	set(common_SRCS ${common_SRCS}

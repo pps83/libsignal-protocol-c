@@ -58,11 +58,11 @@ a very awkward and occasionally broken project configuration.
 
 ### Protocol Buffers compiler
 
-This project uses serialization code based on [Protocol Buffers](https://github.com/google/protobuf).
-Since the official library does not support C, the [protobuf-c](https://github.com/protobuf-c/protobuf-c)
-generator is used instead. For the sake of convenience, the generated code and its dependencies are
-included in the source tree. The generated code can be regenerated at any time by installing the two
-mentioned packages and running "make" in the "protobuf/" subdirectory.
+This project uses serialization code based on [Protocol Buffers](https://github.com/google/protobuf),
+through upb, the C runtime in the protobuf source tree (`PROTOBUF_SOURCE_DIR`). The generated code is included
+in the source tree and must match that tree's upb: after a protobuf update, regenerate it by running "make" in
+the "protobuf/" subdirectory with that release's `protoc`, `protoc-gen-upb` and `protoc-gen-upb_minitable` on
+the PATH.
 
 ## Target platforms
 
