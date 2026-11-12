@@ -602,28 +602,68 @@ int signal_constant_memcmp(const void *s1, const void *s2, size_t n)
     return result;
 }
 
-void signal_protocol_str_serialize_protobuf(ProtobufCBinaryData *buffer, const char *str)
+upb_StringView signal_protocol_str_serialize_protobuf(const char *str)
 {
-    assert(buffer);
     assert(str);
-    buffer->data = (uint8_t *)str;
-    buffer->len = strlen(str);
+    return upb_StringView_FromDataAndSize(str, strlen(str));
 }
 
-char *signal_protocol_str_deserialize_protobuf(ProtobufCBinaryData *buffer)
+char *signal_protocol_str_deserialize_protobuf(upb_StringView buffer)
 {
     char *str = 0;
-    assert(buffer);
 
-    str = malloc(buffer->len + 1);
+    str = malloc(buffer.size + 1);
     if(!str) {
         return 0;
     }
 
-    memcpy(str, buffer->data, buffer->len);
-    str[buffer->len] = '\0';
+    if(buffer.size > 0) {
+        memcpy(str, buffer.data, buffer.size);
+    }
+    str[buffer.size] = '\0';
 
     return str;
+}
+
+upb_StringView signal_protocol_bytes_protobuf(const void *data, size_t len, upb_Arena *arena)
+{
+    char *copy = upb_Arena_Malloc(arena, len > 0 ? len : 1);
+    if(!copy) {
+        return upb_StringView_FromDataAndSize(0, 0);
+    }
+    if(len > 0) {
+        memcpy(copy, data, len);
+    }
+    return upb_StringView_FromDataAndSize(copy, len);
+}
+
+upb_StringView signal_buffer_protobuf(const signal_buffer *buffer)
+{
+    assert(buffer);
+    return upb_StringView_FromDataAndSize((const char *)buffer->data, buffer->len);
+}
+
+int signal_buffer_from_protobuf(signal_buffer **buffer, const void *message, const upb_MiniTable *table,
+        upb_Arena *arena, size_t before, size_t after)
+{
+    signal_buffer *result_buf = 0;
+    char *serialized = 0;
+    size_t len = 0;
+
+    if(upb_Encode((const upb_Message *)message, table, 0, arena, &serialized, &len) != kUpb_EncodeStatus_Ok) {
+        return SG_ERR_INVALID_PROTO_BUF;
+    }
+
+    result_buf = signal_buffer_alloc(before + len + after);
+    if(!result_buf) {
+        return SG_ERR_NOMEM;
+    }
+    if(len > 0) {
+        memcpy(result_buf->data + before, serialized, len);
+    }
+
+    *buffer = result_buf;
+    return 0;
 }
 
 /*------------------------------------------------------------------------*/

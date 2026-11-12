@@ -1,3 +1,3 @@
-
 all:
-	protoc-c --c_out=../src/ WhisperTextProtocol.proto LocalStorageProtocol.proto FingerprintProtocol.proto
+	protoc --upb_out=../src/ --upb_minitable_out=../src/ WhisperTextProtocol.proto LocalStorageProtocol.proto FingerprintProtocol.proto
+	rm -f ../src/*.upb.c

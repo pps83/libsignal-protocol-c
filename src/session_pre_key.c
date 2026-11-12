@@ -5,7 +5,6 @@
 #include <assert.h>
 
 #include "curve.h"
-#include "LocalStorageProtocol.pb-c.h"
 #include "signal_protocol_internal.h"
 
 struct session_pre_key {
@@ -62,15 +61,13 @@ int session_pre_key_create(session_pre_key **pre_key, uint32_t id, ec_key_pair *
 int session_pre_key_serialize(signal_buffer **buffer, const session_pre_key *pre_key)
 {
     int result = 0;
-    size_t result_size = 0;
-    Textsecure__PreKeyRecordStructure record = TEXTSECURE__PRE_KEY_RECORD_STRUCTURE__INIT;
+    upb_Arena *arena = 0;
+    textsecure_PreKeyRecordStructure *record = 0;
     signal_buffer *public_buf = 0;
     signal_buffer *private_buf = 0;
     signal_buffer *result_buf = 0;
     ec_public_key *public_key = 0;
     ec_private_key *private_key = 0;
-    size_t len = 0;
-    uint8_t *data = 0;
 
     if(!pre_key) {
         result = SG_ERR_INVAL;
@@ -89,35 +86,23 @@ int session_pre_key_serialize(signal_buffer **buffer, const session_pre_key *pre
         goto complete;
     }
 
-    record.has_id = 1;
-    record.id = pre_key->id;
-
-    record.has_publickey = 1;
-    record.publickey.data = signal_buffer_data(public_buf);
-    record.publickey.len = signal_buffer_len(public_buf);
-
-    record.has_privatekey = 1;
-    record.privatekey.data = signal_buffer_data(private_buf);
-    record.privatekey.len = signal_buffer_len(private_buf);
-
-    len = textsecure__pre_key_record_structure__get_packed_size(&record);
-
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    record = arena ? textsecure_PreKeyRecordStructure_new(arena) : 0;
+    if(!record) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__pre_key_record_structure__pack(&record, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
-    }
+    textsecure_PreKeyRecordStructure_set_id(record, pre_key->id);
+    textsecure_PreKeyRecordStructure_set_publicKey(record, signal_buffer_protobuf(public_buf));
+    textsecure_PreKeyRecordStructure_set_privateKey(record, signal_buffer_protobuf(private_buf));
+
+    result = signal_buffer_from_protobuf(&result_buf, record, &textsecure__PreKeyRecordStructure_msg_init, arena, 0, 0);
 
 complete:
+    if(arena) {
+        upb_Arena_Free(arena);
+    }
     if(public_buf) {
         signal_buffer_free(public_buf);
     }
@@ -133,29 +118,41 @@ complete:
 int session_pre_key_deserialize(session_pre_key **pre_key, const uint8_t *data, size_t len, signal_context *global_context)
 {
     int result = 0;
-    Textsecure__PreKeyRecordStructure *record = 0;
+    upb_Arena *arena = 0;
+    textsecure_PreKeyRecordStructure *record = 0;
+    upb_StringView field;
     ec_public_key *public_key = 0;
     ec_private_key *private_key = 0;
     ec_key_pair *key_pair = 0;
     session_pre_key *result_pre_key = 0;
 
-    record = textsecure__pre_key_record_structure__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    record = textsecure_PreKeyRecordStructure_parse((const char *)data, len, arena);
     if(!record) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!record->has_id || !record->has_publickey || !record->has_privatekey) {
+    if(!textsecure_PreKeyRecordStructure_has_id(record)
+            || !textsecure_PreKeyRecordStructure_has_publicKey(record)
+            || !textsecure_PreKeyRecordStructure_has_privateKey(record)) {
         result = SG_ERR_INVALID_KEY;
         goto complete;
     }
 
-    result = curve_decode_point(&public_key, record->publickey.data, record->publickey.len, global_context);
+    field = textsecure_PreKeyRecordStructure_publicKey(record);
+    result = curve_decode_point(&public_key, (const uint8_t *)field.data, field.size, global_context);
     if(result < 0) {
         goto complete;
     }
 
-    result = curve_decode_private_point(&private_key, record->privatekey.data, record->privatekey.len, global_context);
+    field = textsecure_PreKeyRecordStructure_privateKey(record);
+    result = curve_decode_private_point(&private_key, (const uint8_t *)field.data, field.size, global_context);
     if(result < 0) {
         goto complete;
     }
@@ -165,14 +162,14 @@ int session_pre_key_deserialize(session_pre_key **pre_key, const uint8_t *data, 
         goto complete;
     }
 
-    result = session_pre_key_create(&result_pre_key, record->id, key_pair);
+    result = session_pre_key_create(&result_pre_key, textsecure_PreKeyRecordStructure_id(record), key_pair);
     if(result < 0) {
         goto complete;
     }
 
 complete:
-    if(record) {
-        textsecure__pre_key_record_structure__free_unpacked(record, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(public_key) {
         SIGNAL_UNREF(public_key);
@@ -250,16 +247,14 @@ int session_signed_pre_key_create(session_signed_pre_key **pre_key,
 int session_signed_pre_key_serialize(signal_buffer **buffer, const session_signed_pre_key *pre_key)
 {
     int result = 0;
-    size_t result_size = 0;
-    Textsecure__SignedPreKeyRecordStructure record = TEXTSECURE__SIGNED_PRE_KEY_RECORD_STRUCTURE__INIT;
+    upb_Arena *arena = 0;
+    textsecure_SignedPreKeyRecordStructure *record = 0;
     signal_buffer *public_buf = 0;
     signal_buffer *private_buf = 0;
     signal_buffer *signature_buf = 0;
     signal_buffer *result_buf = 0;
     ec_public_key *public_key = 0;
     ec_private_key *private_key = 0;
-    size_t len = 0;
-    uint8_t *data = 0;
 
     public_key = ec_key_pair_get_public(pre_key->key_pair);
     result = ec_public_key_serialize(&public_buf, public_key);
@@ -279,42 +274,26 @@ int session_signed_pre_key_serialize(signal_buffer **buffer, const session_signe
         goto complete;
     }
 
-    record.has_id = 1;
-    record.id = pre_key->id;
-
-    record.has_timestamp = 1;
-    record.timestamp = pre_key->timestamp;
-
-    record.has_publickey = 1;
-    record.publickey.data = signal_buffer_data(public_buf);
-    record.publickey.len = signal_buffer_len(public_buf);
-
-    record.has_privatekey = 1;
-    record.privatekey.data = signal_buffer_data(private_buf);
-    record.privatekey.len = signal_buffer_len(private_buf);
-
-    record.has_signature = 1;
-    record.signature.data = signal_buffer_data(signature_buf);
-    record.signature.len = signal_buffer_len(signature_buf);
-
-    len = textsecure__signed_pre_key_record_structure__get_packed_size(&record);
-
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    record = arena ? textsecure_SignedPreKeyRecordStructure_new(arena) : 0;
+    if(!record) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__signed_pre_key_record_structure__pack(&record, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
-    }
+    textsecure_SignedPreKeyRecordStructure_set_id(record, pre_key->id);
+    textsecure_SignedPreKeyRecordStructure_set_timestamp(record, pre_key->timestamp);
+    textsecure_SignedPreKeyRecordStructure_set_publicKey(record, signal_buffer_protobuf(public_buf));
+    textsecure_SignedPreKeyRecordStructure_set_privateKey(record, signal_buffer_protobuf(private_buf));
+    textsecure_SignedPreKeyRecordStructure_set_signature(record, signal_buffer_protobuf(signature_buf));
+
+    result = signal_buffer_from_protobuf(&result_buf, record,
+            &textsecure__SignedPreKeyRecordStructure_msg_init, arena, 0, 0);
 
 complete:
+    if(arena) {
+        upb_Arena_Free(arena);
+    }
     if(public_buf) {
         signal_buffer_free(public_buf);
     }
@@ -333,31 +312,43 @@ complete:
 int session_signed_pre_key_deserialize(session_signed_pre_key **pre_key, const uint8_t *data, size_t len, signal_context *global_context)
 {
     int result = 0;
-    Textsecure__SignedPreKeyRecordStructure *record = 0;
+    upb_Arena *arena = 0;
+    textsecure_SignedPreKeyRecordStructure *record = 0;
+    upb_StringView field;
     ec_public_key *public_key = 0;
     ec_private_key *private_key = 0;
     ec_key_pair *key_pair = 0;
     session_signed_pre_key *result_pre_key = 0;
 
-    record = textsecure__signed_pre_key_record_structure__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    record = textsecure_SignedPreKeyRecordStructure_parse((const char *)data, len, arena);
     if(!record) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!record->has_id || !record->has_timestamp
-            || !record->has_publickey || !record->has_privatekey
-            || !record->has_signature) {
+    if(!textsecure_SignedPreKeyRecordStructure_has_id(record)
+            || !textsecure_SignedPreKeyRecordStructure_has_timestamp(record)
+            || !textsecure_SignedPreKeyRecordStructure_has_publicKey(record)
+            || !textsecure_SignedPreKeyRecordStructure_has_privateKey(record)
+            || !textsecure_SignedPreKeyRecordStructure_has_signature(record)) {
         result = SG_ERR_INVALID_KEY;
         goto complete;
     }
 
-    result = curve_decode_point(&public_key, record->publickey.data, record->publickey.len, global_context);
+    field = textsecure_SignedPreKeyRecordStructure_publicKey(record);
+    result = curve_decode_point(&public_key, (const uint8_t *)field.data, field.size, global_context);
     if(result < 0) {
         goto complete;
     }
 
-    result = curve_decode_private_point(&private_key, record->privatekey.data, record->privatekey.len, global_context);
+    field = textsecure_SignedPreKeyRecordStructure_privateKey(record);
+    result = curve_decode_private_point(&private_key, (const uint8_t *)field.data, field.size, global_context);
     if(result < 0) {
         goto complete;
     }
@@ -367,16 +358,18 @@ int session_signed_pre_key_deserialize(session_signed_pre_key **pre_key, const u
         goto complete;
     }
 
+    field = textsecure_SignedPreKeyRecordStructure_signature(record);
     result = session_signed_pre_key_create(&result_pre_key,
-            record->id, record->timestamp, key_pair,
-            record->signature.data, record->signature.len);
+            textsecure_SignedPreKeyRecordStructure_id(record),
+            textsecure_SignedPreKeyRecordStructure_timestamp(record), key_pair,
+            (const uint8_t *)field.data, field.size);
     if(result < 0) {
         goto complete;
     }
 
 complete:
-    if(record) {
-        textsecure__signed_pre_key_record_structure__free_unpacked(record, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(public_key) {
         SIGNAL_UNREF(public_key);

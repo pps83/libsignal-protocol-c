@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <string.h>
 
-#include "FingerprintProtocol.pb-c.h"
+#include "FingerprintProtocol.upb.h"
 #include "signal_protocol_internal.h"
 #include "vpool.h"
 
@@ -637,61 +637,58 @@ complete:
 int scannable_fingerprint_serialize(signal_buffer **buffer, const scannable_fingerprint *scannable)
 {
     int result = 0;
-    size_t result_size = 0;
     signal_buffer *result_buf = 0;
-    Textsecure__CombinedFingerprints combined_fingerprint = TEXTSECURE__COMBINED_FINGERPRINTS__INIT;
-    Textsecure__LogicalFingerprint local_fingerprint = TEXTSECURE__LOGICAL_FINGERPRINT__INIT;
-    Textsecure__LogicalFingerprint remote_fingerprint = TEXTSECURE__LOGICAL_FINGERPRINT__INIT;
-    size_t len = 0;
-    uint8_t *data = 0;
+    upb_Arena *arena = 0;
+    textsecure_CombinedFingerprints *combined_fingerprint = 0;
+    textsecure_LogicalFingerprint *local_fingerprint = 0;
+    textsecure_LogicalFingerprint *remote_fingerprint = 0;
 
-    combined_fingerprint.version = scannable->version;
-    combined_fingerprint.has_version = 1;
-
-    if(scannable->local_fingerprint) {
-        if(scannable->version == 0 && scannable->local_stable_identifier) {
-            signal_protocol_str_serialize_protobuf(&local_fingerprint.identifier, scannable->local_stable_identifier);
-            local_fingerprint.has_identifier = 1;
-        }
-
-        local_fingerprint.content.data = signal_buffer_data(scannable->local_fingerprint);
-        local_fingerprint.content.len = signal_buffer_len(scannable->local_fingerprint);
-        local_fingerprint.has_content = 1;
-
-        combined_fingerprint.localfingerprint = &local_fingerprint;
-    }
-
-    if(scannable->remote_fingerprint) {
-        if(scannable->version == 0 && scannable->remote_stable_identifier) {
-            signal_protocol_str_serialize_protobuf(&remote_fingerprint.identifier, scannable->remote_stable_identifier);
-            remote_fingerprint.has_identifier = 1;
-        }
-
-        remote_fingerprint.content.data = signal_buffer_data(scannable->remote_fingerprint);
-        remote_fingerprint.content.len = signal_buffer_len(scannable->remote_fingerprint);
-        remote_fingerprint.has_content = 1;
-
-        combined_fingerprint.remotefingerprint = &remote_fingerprint;
-    }
-
-    len = textsecure__combined_fingerprints__get_packed_size(&combined_fingerprint);
-
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    combined_fingerprint = arena ? textsecure_CombinedFingerprints_new(arena) : 0;
+    if(!combined_fingerprint) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__combined_fingerprints__pack(&combined_fingerprint, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
+    textsecure_CombinedFingerprints_set_version(combined_fingerprint, scannable->version);
+
+    if(scannable->local_fingerprint) {
+        local_fingerprint = textsecure_CombinedFingerprints_mutable_localFingerprint(combined_fingerprint, arena);
+        if(!local_fingerprint) {
+            result = SG_ERR_NOMEM;
+            goto complete;
+        }
+
+        if(scannable->version == 0 && scannable->local_stable_identifier) {
+            textsecure_LogicalFingerprint_set_identifier(local_fingerprint,
+                    signal_protocol_str_serialize_protobuf(scannable->local_stable_identifier));
+        }
+
+        textsecure_LogicalFingerprint_set_content(local_fingerprint, signal_buffer_protobuf(scannable->local_fingerprint));
     }
 
+    if(scannable->remote_fingerprint) {
+        remote_fingerprint = textsecure_CombinedFingerprints_mutable_remoteFingerprint(combined_fingerprint, arena);
+        if(!remote_fingerprint) {
+            result = SG_ERR_NOMEM;
+            goto complete;
+        }
+
+        if(scannable->version == 0 && scannable->remote_stable_identifier) {
+            textsecure_LogicalFingerprint_set_identifier(remote_fingerprint,
+                    signal_protocol_str_serialize_protobuf(scannable->remote_stable_identifier));
+        }
+
+        textsecure_LogicalFingerprint_set_content(remote_fingerprint, signal_buffer_protobuf(scannable->remote_fingerprint));
+    }
+
+    result = signal_buffer_from_protobuf(&result_buf, combined_fingerprint,
+            &textsecure__CombinedFingerprints_msg_init, arena, 0, 0);
+
 complete:
+    if(arena) {
+        upb_Arena_Free(arena);
+    }
     if(result >= 0) {
         *buffer = result_buf;
     }
@@ -701,35 +698,45 @@ complete:
 int scannable_fingerprint_deserialize(scannable_fingerprint **scannable, const uint8_t *data, size_t len, signal_context *global_context)
 {
     int result = 0;
-    Textsecure__CombinedFingerprints *combined_fingerprint = 0;
+    upb_Arena *arena = 0;
+    textsecure_CombinedFingerprints *combined_fingerprint = 0;
+    const textsecure_LogicalFingerprint *logical_fingerprint = 0;
+    upb_StringView field;
     uint32_t version = 0;
     char *local_stable_identifier = 0;
     signal_buffer *local_fingerprint = 0;
     char *remote_stable_identifier = 0;
     signal_buffer *remote_fingerprint = 0;
 
-    combined_fingerprint = textsecure__combined_fingerprints__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    combined_fingerprint = textsecure_CombinedFingerprints_parse((const char *)data, len, arena);
     if(!combined_fingerprint) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(combined_fingerprint->has_version) {
-        version = combined_fingerprint->version;
+    if(textsecure_CombinedFingerprints_has_version(combined_fingerprint)) {
+        version = textsecure_CombinedFingerprints_version(combined_fingerprint);
     }
 
-    if(combined_fingerprint->localfingerprint) {
-        if(combined_fingerprint->localfingerprint->has_identifier) {
-            local_stable_identifier = signal_protocol_str_deserialize_protobuf(&combined_fingerprint->localfingerprint->identifier);
+    logical_fingerprint = textsecure_CombinedFingerprints_localFingerprint(combined_fingerprint);
+    if(logical_fingerprint) {
+        if(textsecure_LogicalFingerprint_has_identifier(logical_fingerprint)) {
+            local_stable_identifier = signal_protocol_str_deserialize_protobuf(
+                    textsecure_LogicalFingerprint_identifier(logical_fingerprint));
             if(!local_stable_identifier) {
                 result = SG_ERR_NOMEM;
                 goto complete;
             }
         }
-        if(combined_fingerprint->localfingerprint->has_content) {
-            local_fingerprint = signal_buffer_create(
-                    combined_fingerprint->localfingerprint->content.data,
-                    combined_fingerprint->localfingerprint->content.len);
+        if(textsecure_LogicalFingerprint_has_content(logical_fingerprint)) {
+            field = textsecure_LogicalFingerprint_content(logical_fingerprint);
+            local_fingerprint = signal_buffer_create((const uint8_t *)field.data, field.size);
             if(!local_fingerprint) {
                 result = SG_ERR_NOMEM;
                 goto complete;
@@ -737,18 +744,19 @@ int scannable_fingerprint_deserialize(scannable_fingerprint **scannable, const u
         }
     }
 
-    if(combined_fingerprint->remotefingerprint) {
-        if(combined_fingerprint->remotefingerprint->has_identifier) {
-            remote_stable_identifier = signal_protocol_str_deserialize_protobuf(&combined_fingerprint->remotefingerprint->identifier);
+    logical_fingerprint = textsecure_CombinedFingerprints_remoteFingerprint(combined_fingerprint);
+    if(logical_fingerprint) {
+        if(textsecure_LogicalFingerprint_has_identifier(logical_fingerprint)) {
+            remote_stable_identifier = signal_protocol_str_deserialize_protobuf(
+                    textsecure_LogicalFingerprint_identifier(logical_fingerprint));
             if(!remote_stable_identifier) {
                 result = SG_ERR_NOMEM;
                 goto complete;
             }
         }
-        if(combined_fingerprint->remotefingerprint->has_content) {
-            remote_fingerprint = signal_buffer_create(
-                    combined_fingerprint->remotefingerprint->content.data,
-                    combined_fingerprint->remotefingerprint->content.len);
+        if(textsecure_LogicalFingerprint_has_content(logical_fingerprint)) {
+            field = textsecure_LogicalFingerprint_content(logical_fingerprint);
+            remote_fingerprint = signal_buffer_create((const uint8_t *)field.data, field.size);
             if(!remote_fingerprint) {
                 result = SG_ERR_NOMEM;
                 goto complete;
@@ -761,8 +769,8 @@ int scannable_fingerprint_deserialize(scannable_fingerprint **scannable, const u
             remote_stable_identifier, remote_fingerprint);
 
 complete:
-    if(combined_fingerprint) {
-        textsecure__combined_fingerprints__free_unpacked(combined_fingerprint, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(local_stable_identifier) {
         free(local_stable_identifier);

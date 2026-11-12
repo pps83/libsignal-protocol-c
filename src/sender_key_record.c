@@ -5,7 +5,6 @@
 #include "sender_key_state.h"
 #include "sender_key.h"
 #include "utlist.h"
-#include "LocalStorageProtocol.pb-c.h"
 #include "signal_protocol_internal.h"
 
 #define MAX_STATES 5
@@ -42,75 +41,38 @@ int sender_key_record_create(sender_key_record **record,
 int sender_key_record_serialize(signal_buffer **buffer, sender_key_record *record)
 {
     int result = 0;
-    size_t result_size = 0;
-    unsigned int i = 0;
-    Textsecure__SenderKeyRecordStructure record_structure = TEXTSECURE__SENDER_KEY_RECORD_STRUCTURE__INIT;
+    upb_Arena *arena = 0;
+    textsecure_SenderKeyRecordStructure *record_structure = 0;
     sender_key_state_node *cur_node = 0;
     signal_buffer *result_buf = 0;
-    uint8_t *data;
-    size_t len;
 
-    if(record->sender_key_states_head) {
-        size_t count;
-        DL_COUNT(record->sender_key_states_head, cur_node, count);
+    arena = upb_Arena_New();
+    record_structure = arena ? textsecure_SenderKeyRecordStructure_new(arena) : 0;
+    if(!record_structure) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
 
-        if(count > SIZE_MAX / sizeof(Textsecure__SenderKeyStateStructure *)) {
+    DL_FOREACH(record->sender_key_states_head, cur_node) {
+        textsecure_SenderKeyStateStructure *state_structure =
+                textsecure_SenderKeyRecordStructure_add_senderKeyStates(record_structure, arena);
+        if(!state_structure) {
             result = SG_ERR_NOMEM;
             goto complete;
         }
 
-        record_structure.senderkeystates = malloc(sizeof(Textsecure__SenderKeyStateStructure *) * count);
-        if(!record_structure.senderkeystates) {
-            result = SG_ERR_NOMEM;
-            goto complete;
-        }
-
-        i = 0;
-        DL_FOREACH(record->sender_key_states_head, cur_node) {
-            record_structure.senderkeystates[i] = malloc(sizeof(Textsecure__SenderKeyStateStructure));
-            if(!record_structure.senderkeystates[i]) {
-                result = SG_ERR_NOMEM;
-                break;
-            }
-            textsecure__sender_key_state_structure__init(record_structure.senderkeystates[i]);
-
-            result = sender_key_state_serialize_prepare(cur_node->state, record_structure.senderkeystates[i]);
-            if(result < 0) {
-                break;
-            }
-            i++;
-        }
-        record_structure.n_senderkeystates = i;
+        result = sender_key_state_serialize_prepare(cur_node->state, state_structure, arena);
         if(result < 0) {
             goto complete;
         }
     }
 
-    len = textsecure__sender_key_record_structure__get_packed_size(&record_structure);
-
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
-
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__sender_key_record_structure__pack(&record_structure, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
-    }
+    result = signal_buffer_from_protobuf(&result_buf, record_structure,
+            &textsecure__SenderKeyRecordStructure_msg_init, arena, 0, 0);
 
 complete:
-    if(record_structure.senderkeystates) {
-        for(i = 0; i < record_structure.n_senderkeystates; i++) {
-            if(record_structure.senderkeystates[i]) {
-                sender_key_state_serialize_prepare_free(record_structure.senderkeystates[i]);
-            }
-        }
-        free(record_structure.senderkeystates);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
 
     if(result >= 0) {
@@ -123,9 +85,18 @@ int sender_key_record_deserialize(sender_key_record **record, const uint8_t *dat
 {
     int result = 0;
     sender_key_record *result_record = 0;
-    Textsecure__SenderKeyRecordStructure *record_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_SenderKeyRecordStructure *record_structure = 0;
+    const textsecure_SenderKeyStateStructure *const *states = 0;
+    size_t state_count = 0;
 
-    record_structure = textsecure__sender_key_record_structure__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    record_structure = textsecure_SenderKeyRecordStructure_parse((const char *)data, len, arena);
     if(!record_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
@@ -136,12 +107,13 @@ int sender_key_record_deserialize(sender_key_record **record, const uint8_t *dat
         goto complete;
     }
 
-    if(record_structure->n_senderkeystates > 0) {
-        unsigned int i;
+    states = textsecure_SenderKeyRecordStructure_senderKeyStates(record_structure, &state_count);
+    if(state_count > 0) {
+        size_t i;
         sender_key_state_node *state_node = 0;
         sender_key_state *state_element = 0;
-        for(i = 0; i < record_structure->n_senderkeystates; i++) {
-            result = sender_key_state_deserialize_protobuf(&state_element, record_structure->senderkeystates[i], global_context);
+        for(i = 0; i < state_count; i++) {
+            result = sender_key_state_deserialize_protobuf(&state_element, states[i], global_context);
             if(result < 0) {
                 goto complete;
             }
@@ -158,8 +130,8 @@ int sender_key_record_deserialize(sender_key_record **record, const uint8_t *dat
     }
 
 complete:
-    if(record_structure) {
-        textsecure__sender_key_record_structure__free_unpacked(record_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result_record) {
         if(result < 0) {

@@ -6,7 +6,6 @@
 
 #include "session_state.h"
 #include "utlist.h"
-#include "LocalStorageProtocol.pb-c.h"
 #include "signal_protocol_internal.h"
 
 #define ARCHIVED_STATES_MAX_LENGTH 40
@@ -60,95 +59,60 @@ int session_record_create(session_record **record, session_state *state, signal_
 int session_record_serialize(signal_buffer **buffer, const session_record *record)
 {
     int result = 0;
-    size_t result_size = 0;
-    unsigned int i = 0;
-    Textsecure__RecordStructure record_structure = TEXTSECURE__RECORD_STRUCTURE__INIT;
+    upb_Arena *arena = 0;
+    textsecure_RecordStructure *record_structure = 0;
     session_record_state_node *cur_node = 0;
     signal_buffer *result_buf = 0;
-    size_t len = 0;
-    uint8_t *data = 0;
 
     if(!record) {
         result = SG_ERR_INVAL;
         goto complete;
     }
 
+    arena = upb_Arena_New();
+    record_structure = arena ? textsecure_RecordStructure_new(arena) : 0;
+    if(!record_structure) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
     if(record->state) {
-        record_structure.currentsession = malloc(sizeof(Textsecure__SessionStructure));
-        if(!record_structure.currentsession) {
+        textsecure_SessionStructure *session_structure =
+                textsecure_RecordStructure_mutable_currentSession(record_structure, arena);
+        if(!session_structure) {
             result = SG_ERR_NOMEM;
             goto complete;
         }
-        textsecure__session_structure__init(record_structure.currentsession);
-        result = session_state_serialize_prepare(record->state, record_structure.currentsession);
+        result = session_state_serialize_prepare(record->state, session_structure, arena);
         if(result < 0) {
             goto complete;
         }
     }
 
     if(record->previous_states_head) {
-        size_t count;
-        DL_COUNT(record->previous_states_head, cur_node, count);
-
-        if(count > SIZE_MAX / sizeof(Textsecure__SessionStructure *)) {
-            result = SG_ERR_NOMEM;
-            goto complete;
-        }
-
-        record_structure.previoussessions = malloc(sizeof(Textsecure__SessionStructure *) * count);
-        if(!record_structure.previoussessions) {
-            result = SG_ERR_NOMEM;
-            goto complete;
-        }
-
-        i = 0;
         DL_FOREACH(record->previous_states_head, cur_node) {
-            record_structure.previoussessions[i] = malloc(sizeof(Textsecure__SessionStructure));
-            if(!record_structure.previoussessions[i]) {
+            textsecure_SessionStructure *session_structure =
+                    textsecure_RecordStructure_add_previousSessions(record_structure, arena);
+            if(!session_structure) {
                 result = SG_ERR_NOMEM;
                 break;
             }
-            textsecure__session_structure__init(record_structure.previoussessions[i]);
-            result = session_state_serialize_prepare(cur_node->state, record_structure.previoussessions[i]);
+            result = session_state_serialize_prepare(cur_node->state, session_structure, arena);
             if(result < 0) {
                 break;
             }
-            i++;
         }
-        record_structure.n_previoussessions = i;
         if(result < 0) {
             goto complete;
         }
     }
 
-    len = textsecure__record_structure__get_packed_size(&record_structure);
-
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
-
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__record_structure__pack(&record_structure, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
-    }
+    result = signal_buffer_from_protobuf(&result_buf, record_structure,
+            &textsecure__RecordStructure_msg_init, arena, 0, 0);
 
 complete:
-    if(record_structure.currentsession) {
-        session_state_serialize_prepare_free(record_structure.currentsession);
-    }
-    if(record_structure.previoussessions) {
-        for(i = 0; i < record_structure.n_previoussessions; i++) {
-            if(record_structure.previoussessions[i]) {
-                session_state_serialize_prepare_free(record_structure.previoussessions[i]);
-            }
-        }
-        free(record_structure.previoussessions);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
 
     if(result >= 0) {
@@ -163,16 +127,26 @@ int session_record_deserialize(session_record **record, const uint8_t *data, siz
     session_record *result_record = 0;
     session_state *current_state = 0;
     session_record_state_node *previous_states_head = 0;
-    Textsecure__RecordStructure *record_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_RecordStructure *record_structure = 0;
+    const textsecure_SessionStructure *const *previous_sessions = 0;
+    size_t previous_session_count = 0;
 
-    record_structure = textsecure__record_structure__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    record_structure = textsecure_RecordStructure_parse((const char *)data, len, arena);
     if(!record_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(record_structure->currentsession) {
-        result = session_state_deserialize_protobuf(&current_state, record_structure->currentsession, global_context);
+    if(textsecure_RecordStructure_has_currentSession(record_structure)) {
+        result = session_state_deserialize_protobuf(&current_state,
+                textsecure_RecordStructure_currentSession(record_structure), global_context);
         if(result < 0) {
             goto complete;
         }
@@ -186,11 +160,11 @@ int session_record_deserialize(session_record **record, const uint8_t *data, siz
     current_state = 0;
     result_record->is_fresh = 0;
 
-    if(record_structure->n_previoussessions > 0) {
-        unsigned int i;
-        for(i = 0; i < record_structure->n_previoussessions; i++) {
-            Textsecure__SessionStructure *session_structure =
-                    record_structure->previoussessions[i];
+    previous_sessions = textsecure_RecordStructure_previousSessions(record_structure, &previous_session_count);
+    if(previous_session_count > 0) {
+        size_t i;
+        for(i = 0; i < previous_session_count; i++) {
+            const textsecure_SessionStructure *session_structure = previous_sessions[i];
 
             session_record_state_node *node = malloc(sizeof(session_record_state_node));
             if(!node) {
@@ -211,8 +185,8 @@ int session_record_deserialize(session_record **record, const uint8_t *data, siz
     previous_states_head = 0;
 
 complete:
-    if(record_structure) {
-        textsecure__record_structure__free_unpacked(record_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(current_state) {
         SIGNAL_UNREF(current_state);

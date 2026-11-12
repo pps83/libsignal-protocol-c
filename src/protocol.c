@@ -5,7 +5,7 @@
 
 #include "curve.h"
 #include "signal_protocol_internal.h"
-#include "WhisperTextProtocol.pb-c.h"
+#include "WhisperTextProtocol.upb.h"
 
 #define SIGNAL_MESSAGE_MAC_LENGTH 8
 #define SIGNATURE_LENGTH 64
@@ -175,52 +175,38 @@ complete:
 static int signal_message_serialize(signal_buffer **buffer, const signal_message *message)
 {
     int result = 0;
-    size_t result_size = 0;
     signal_buffer *result_buf = 0;
-    Textsecure__SignalMessage message_structure = TEXTSECURE__SIGNAL_MESSAGE__INIT;
-    size_t len = 0;
-    uint8_t *data = 0;
+    upb_Arena *arena = 0;
+    textsecure_SignalMessage *message_structure = 0;
+    upb_StringView ratchet_key;
 
     uint8_t version = (message->message_version << 4) | CIPHERTEXT_CURRENT_VERSION;
 
-    result = ec_public_key_serialize_protobuf(&message_structure.ratchetkey, message->sender_ratchet_key);
-    if(result < 0) {
-        goto complete;
-    }
-    message_structure.has_ratchetkey = 1;
-
-    message_structure.counter = message->counter;
-    message_structure.has_counter = 1;
-
-    message_structure.previouscounter = message->previous_counter;
-    message_structure.has_previouscounter = 1;
-
-    message_structure.ciphertext.data = signal_buffer_data(message->ciphertext);
-    message_structure.ciphertext.len = signal_buffer_len(message->ciphertext);
-    message_structure.has_ciphertext = 1;
-
-    len = textsecure__signal_message__get_packed_size(&message_structure);
-
-    result_buf = signal_buffer_alloc(len + 1);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    message_structure = arena ? textsecure_SignalMessage_new(arena) : 0;
+    if(!message_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    data[0] = version;
-
-    result_size = textsecure__signal_message__pack(&message_structure, data + 1);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
+    result = ec_public_key_serialize_protobuf(&ratchet_key, message->sender_ratchet_key, arena);
+    if(result < 0) {
         goto complete;
     }
+    textsecure_SignalMessage_set_ratchetKey(message_structure, ratchet_key);
+    textsecure_SignalMessage_set_counter(message_structure, message->counter);
+    textsecure_SignalMessage_set_previousCounter(message_structure, message->previous_counter);
+    textsecure_SignalMessage_set_ciphertext(message_structure, signal_buffer_protobuf(message->ciphertext));
+
+    result = signal_buffer_from_protobuf(&result_buf, message_structure, &textsecure__SignalMessage_msg_init, arena, 1, 0);
+    if(result < 0) {
+        goto complete;
+    }
+    signal_buffer_data(result_buf)[0] = version;
 
 complete:
-    if(message_structure.ratchetkey.data) {
-        free(message_structure.ratchetkey.data);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *buffer = result_buf;
@@ -232,9 +218,10 @@ int signal_message_deserialize(signal_message **message, const uint8_t *data, si
 {
     int result = 0;
     signal_message *result_message = 0;
-    Textsecure__SignalMessage *message_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_SignalMessage *message_structure = 0;
+    upb_StringView field;
     uint8_t version = 0;
-    uint8_t *ciphertext_data = 0;
     uint8_t *serialized_data = 0;
     const uint8_t *message_data = 0;
     size_t message_len = 0;
@@ -264,15 +251,21 @@ int signal_message_deserialize(signal_message **message, const uint8_t *data, si
         goto complete;
     }
 
-    message_structure = textsecure__signal_message__unpack(0, message_len, message_data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    message_structure = textsecure_SignalMessage_parse((const char *)message_data, message_len, arena);
     if(!message_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!message_structure->has_ciphertext
-            || !message_structure->has_counter
-            || !message_structure->has_ratchetkey) {
+    if(!textsecure_SignalMessage_has_ciphertext(message_structure)
+            || !textsecure_SignalMessage_has_counter(message_structure)
+            || !textsecure_SignalMessage_has_ratchetKey(message_structure)) {
         signal_log(global_context, SG_LOG_WARNING, "Incomplete message");
         result = SG_ERR_INVALID_MESSAGE;
         goto complete;
@@ -289,23 +282,23 @@ int signal_message_deserialize(signal_message **message, const uint8_t *data, si
     result_message->base_message.message_type = CIPHERTEXT_SIGNAL_TYPE;
     result_message->base_message.global_context = global_context;
 
+    field = textsecure_SignalMessage_ratchetKey(message_structure);
     result = curve_decode_point(&result_message->sender_ratchet_key,
-            message_structure->ratchetkey.data, message_structure->ratchetkey.len, global_context);
+            (const uint8_t *)field.data, field.size, global_context);
     if(result < 0) {
         goto complete;
     }
 
     result_message->message_version = version;
-    result_message->counter = message_structure->counter;
-    result_message->previous_counter = message_structure->previouscounter;
+    result_message->counter = textsecure_SignalMessage_counter(message_structure);
+    result_message->previous_counter = textsecure_SignalMessage_previousCounter(message_structure);
 
-    result_message->ciphertext = signal_buffer_alloc(message_structure->ciphertext.len);
+    field = textsecure_SignalMessage_ciphertext(message_structure);
+    result_message->ciphertext = signal_buffer_create((const uint8_t *)field.data, field.size);
     if(!result_message->ciphertext) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
-    ciphertext_data = signal_buffer_data(result_message->ciphertext);
-    memcpy(ciphertext_data, message_structure->ciphertext.data, message_structure->ciphertext.len);
 
     result_message->base_message.serialized = signal_buffer_alloc(len);
     if(!result_message->base_message.serialized) {
@@ -316,8 +309,8 @@ int signal_message_deserialize(signal_message **message, const uint8_t *data, si
     memcpy(serialized_data, data, len);
 
 complete:
-    if(message_structure) {
-        textsecure__signal_message__free_unpacked(message_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *message = result_message;
@@ -594,68 +587,53 @@ int pre_key_signal_message_create(pre_key_signal_message **pre_key_message,
 static int pre_key_signal_message_serialize(signal_buffer **buffer, const pre_key_signal_message *message)
 {
     int result = 0;
-    size_t result_size = 0;
     signal_buffer *result_buf = 0;
-    Textsecure__PreKeySignalMessage message_structure = TEXTSECURE__PRE_KEY_SIGNAL_MESSAGE__INIT;
-    signal_buffer *inner_message_buffer = 0;
-    size_t len = 0;
-    uint8_t *data = 0;
+    upb_Arena *arena = 0;
+    textsecure_PreKeySignalMessage *message_structure = 0;
+    upb_StringView key;
 
     uint8_t version = (message->version << 4) | CIPHERTEXT_CURRENT_VERSION;
 
-    message_structure.registrationid = message->registration_id;
-    message_structure.has_registrationid = 1;
-
-    if(message->has_pre_key_id) {
-        message_structure.prekeyid = message->pre_key_id;
-        message_structure.has_prekeyid = 1;
-    }
-
-    message_structure.signedprekeyid = message->signed_pre_key_id;
-    message_structure.has_signedprekeyid = 1;
-
-    result = ec_public_key_serialize_protobuf(&message_structure.basekey, message->base_key);
-    if(result < 0) {
-        goto complete;
-    }
-    message_structure.has_basekey = 1;
-
-    result = ec_public_key_serialize_protobuf(&message_structure.identitykey, message->identity_key);
-    if(result < 0) {
-        goto complete;
-    }
-    message_structure.has_identitykey = 1;
-
-    inner_message_buffer = message->message->base_message.serialized;
-    message_structure.message.data = signal_buffer_data(inner_message_buffer);
-    message_structure.message.len = signal_buffer_len(inner_message_buffer);
-    message_structure.has_message = 1;
-
-    len = textsecure__pre_key_signal_message__get_packed_size(&message_structure);
-
-    result_buf = signal_buffer_alloc(len + 1);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    message_structure = arena ? textsecure_PreKeySignalMessage_new(arena) : 0;
+    if(!message_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    data[0] = version;
+    textsecure_PreKeySignalMessage_set_registrationId(message_structure, message->registration_id);
 
-    result_size = textsecure__pre_key_signal_message__pack(&message_structure, data + 1);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
+    if(message->has_pre_key_id) {
+        textsecure_PreKeySignalMessage_set_preKeyId(message_structure, message->pre_key_id);
+    }
+
+    textsecure_PreKeySignalMessage_set_signedPreKeyId(message_structure, message->signed_pre_key_id);
+
+    result = ec_public_key_serialize_protobuf(&key, message->base_key, arena);
+    if(result < 0) {
         goto complete;
     }
+    textsecure_PreKeySignalMessage_set_baseKey(message_structure, key);
+
+    result = ec_public_key_serialize_protobuf(&key, message->identity_key, arena);
+    if(result < 0) {
+        goto complete;
+    }
+    textsecure_PreKeySignalMessage_set_identityKey(message_structure, key);
+
+    textsecure_PreKeySignalMessage_set_message(message_structure,
+            signal_buffer_protobuf(message->message->base_message.serialized));
+
+    result = signal_buffer_from_protobuf(&result_buf, message_structure,
+            &textsecure__PreKeySignalMessage_msg_init, arena, 1, 0);
+    if(result < 0) {
+        goto complete;
+    }
+    signal_buffer_data(result_buf)[0] = version;
 
 complete:
-    if(message_structure.basekey.data) {
-        free(message_structure.basekey.data);
-    }
-    if(message_structure.identitykey.data) {
-        free(message_structure.identitykey.data);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *buffer = result_buf;
@@ -669,7 +647,9 @@ int pre_key_signal_message_deserialize(pre_key_signal_message **message,
 {
     int result = 0;
     pre_key_signal_message *result_message = 0;
-    Textsecure__PreKeySignalMessage *message_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_PreKeySignalMessage *message_structure = 0;
+    upb_StringView field;
     uint8_t version = 0;
     const uint8_t *message_data = 0;
     size_t message_len = 0;
@@ -700,16 +680,22 @@ int pre_key_signal_message_deserialize(pre_key_signal_message **message,
         goto complete;
     }
 
-    message_structure = textsecure__pre_key_signal_message__unpack(0, message_len, message_data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    message_structure = textsecure_PreKeySignalMessage_parse((const char *)message_data, message_len, arena);
     if(!message_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!message_structure->has_signedprekeyid ||
-            !message_structure->has_basekey ||
-            !message_structure->has_identitykey ||
-            !message_structure->has_message) {
+    if(!textsecure_PreKeySignalMessage_has_signedPreKeyId(message_structure) ||
+            !textsecure_PreKeySignalMessage_has_baseKey(message_structure) ||
+            !textsecure_PreKeySignalMessage_has_identityKey(message_structure) ||
+            !textsecure_PreKeySignalMessage_has_message(message_structure)) {
         signal_log(global_context, SG_LOG_WARNING, "Incomplete message");
         result = SG_ERR_INVALID_MESSAGE;
         goto complete;
@@ -728,39 +714,42 @@ int pre_key_signal_message_deserialize(pre_key_signal_message **message,
 
     result_message->version = version;
 
-    if(message_structure->has_registrationid) {
-        result_message->registration_id = message_structure->registrationid;
+    if(textsecure_PreKeySignalMessage_has_registrationId(message_structure)) {
+        result_message->registration_id = textsecure_PreKeySignalMessage_registrationId(message_structure);
     }
 
-    if(message_structure->has_prekeyid) {
-        result_message->pre_key_id = message_structure->prekeyid;
+    if(textsecure_PreKeySignalMessage_has_preKeyId(message_structure)) {
+        result_message->pre_key_id = textsecure_PreKeySignalMessage_preKeyId(message_structure);
         result_message->has_pre_key_id = 1;
     }
 
-    if(message_structure->has_signedprekeyid) {
-        result_message->signed_pre_key_id = message_structure->signedprekeyid;
+    if(textsecure_PreKeySignalMessage_has_signedPreKeyId(message_structure)) {
+        result_message->signed_pre_key_id = textsecure_PreKeySignalMessage_signedPreKeyId(message_structure);
     }
 
-    if(message_structure->has_basekey) {
+    if(textsecure_PreKeySignalMessage_has_baseKey(message_structure)) {
+        field = textsecure_PreKeySignalMessage_baseKey(message_structure);
         result = curve_decode_point(&result_message->base_key,
-                message_structure->basekey.data, message_structure->basekey.len, global_context);
+                (const uint8_t *)field.data, field.size, global_context);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(message_structure->has_identitykey) {
+    if(textsecure_PreKeySignalMessage_has_identityKey(message_structure)) {
+        field = textsecure_PreKeySignalMessage_identityKey(message_structure);
         result = curve_decode_point(&result_message->identity_key,
-                message_structure->identitykey.data, message_structure->identitykey.len, global_context);
+                (const uint8_t *)field.data, field.size, global_context);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(message_structure->has_message) {
+    if(textsecure_PreKeySignalMessage_has_message(message_structure)) {
+        field = textsecure_PreKeySignalMessage_message(message_structure);
         result = signal_message_deserialize(&result_message->message,
-                message_structure->message.data,
-                message_structure->message.len,
+                (const uint8_t *)field.data,
+                field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -782,8 +771,8 @@ int pre_key_signal_message_deserialize(pre_key_signal_message **message,
     memcpy(serialized_data, data, len);
 
 complete:
-    if(message_structure) {
-        textsecure__pre_key_signal_message__free_unpacked(message_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *message = result_message;
@@ -935,41 +924,33 @@ int sender_key_message_serialize(signal_buffer **buffer, const sender_key_messag
 {
     int result = 0;
     uint8_t version = (CIPHERTEXT_CURRENT_VERSION << 4) | CIPHERTEXT_CURRENT_VERSION;
-    size_t result_size = 0;
     signal_buffer *result_buf = 0;
     signal_buffer *signature_buf = 0;
-    Textsecure__SenderKeyMessage message_structure = TEXTSECURE__SENDER_KEY_MESSAGE__INIT;
+    upb_Arena *arena = 0;
+    textsecure_SenderKeyMessage *message_structure = 0;
     size_t len = 0;
     uint8_t *data = 0;
 
-    message_structure.id = message->key_id;
-    message_structure.has_id = 1;
-
-    message_structure.iteration = message->iteration;
-    message_structure.has_iteration = 1;
-
-    message_structure.ciphertext.data = signal_buffer_data(message->ciphertext);
-    message_structure.ciphertext.len = signal_buffer_len(message->ciphertext);
-    message_structure.has_ciphertext = 1;
-
-    len = textsecure__sender_key_message__get_packed_size(&message_structure);
-
-    result_buf = signal_buffer_alloc(sizeof(version) + len + SIGNATURE_LENGTH);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    message_structure = arena ? textsecure_SenderKeyMessage_new(arena) : 0;
+    if(!message_structure) {
         result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    textsecure_SenderKeyMessage_set_id(message_structure, message->key_id);
+    textsecure_SenderKeyMessage_set_iteration(message_structure, message->iteration);
+    textsecure_SenderKeyMessage_set_ciphertext(message_structure, signal_buffer_protobuf(message->ciphertext));
+
+    result = signal_buffer_from_protobuf(&result_buf, message_structure,
+            &textsecure__SenderKeyMessage_msg_init, arena, sizeof(version), SIGNATURE_LENGTH);
+    if(result < 0) {
         goto complete;
     }
 
     data = signal_buffer_data(result_buf);
     data[0] = version;
-
-    result_size = textsecure__sender_key_message__pack(&message_structure, data + sizeof(version));
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
-    }
+    len = signal_buffer_len(result_buf) - sizeof(version) - SIGNATURE_LENGTH;
 
     result = curve_calculate_signature(global_context, &signature_buf, signature_key,
             data, len + sizeof(version));
@@ -987,6 +968,9 @@ int sender_key_message_serialize(signal_buffer **buffer, const sender_key_messag
     memcpy(data + sizeof(version) + len, signal_buffer_data(signature_buf), SIGNATURE_LENGTH);
 
 complete:
+    if(arena) {
+        upb_Arena_Free(arena);
+    }
     signal_buffer_free(signature_buf);
     if(result >= 0) {
         *buffer = result_buf;
@@ -1006,7 +990,9 @@ int sender_key_message_deserialize(sender_key_message **message,
     uint8_t version = 0;
     const uint8_t *message_data = 0;
     size_t message_len = 0;
-    Textsecure__SenderKeyMessage *message_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_SenderKeyMessage *message_structure = 0;
+    upb_StringView field;
 
     assert(global_context);
 
@@ -1031,15 +1017,21 @@ int sender_key_message_deserialize(sender_key_message **message,
         goto complete;
     }
 
-    message_structure = textsecure__sender_key_message__unpack(0, message_len, message_data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    message_structure = textsecure_SenderKeyMessage_parse((const char *)message_data, message_len, arena);
     if(!message_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!message_structure->has_id
-            || !message_structure->has_iteration
-            || !message_structure->has_ciphertext) {
+    if(!textsecure_SenderKeyMessage_has_id(message_structure)
+            || !textsecure_SenderKeyMessage_has_iteration(message_structure)
+            || !textsecure_SenderKeyMessage_has_ciphertext(message_structure)) {
         signal_log(global_context, SG_LOG_WARNING, "Incomplete message");
         result = SG_ERR_INVALID_MESSAGE;
         goto complete;
@@ -1056,13 +1048,12 @@ int sender_key_message_deserialize(sender_key_message **message,
     result_message->base_message.message_type = CIPHERTEXT_SENDERKEY_TYPE;
     result_message->base_message.global_context = global_context;
 
-    result_message->key_id = message_structure->id;
-    result_message->iteration = message_structure->iteration;
+    result_message->key_id = textsecure_SenderKeyMessage_id(message_structure);
+    result_message->iteration = textsecure_SenderKeyMessage_iteration(message_structure);
     result_message->message_version = version;
 
-    result_message->ciphertext = signal_buffer_create(
-            message_structure->ciphertext.data,
-            message_structure->ciphertext.len);
+    field = textsecure_SenderKeyMessage_ciphertext(message_structure);
+    result_message->ciphertext = signal_buffer_create((const uint8_t *)field.data, field.size);
     if(!result_message->ciphertext) {
         result = SG_ERR_NOMEM;
         goto complete;
@@ -1075,8 +1066,8 @@ int sender_key_message_deserialize(sender_key_message **message,
     }
 
 complete:
-    if(message_structure) {
-        textsecure__sender_key_message__free_unpacked(message_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *message = result_message;
@@ -1226,50 +1217,38 @@ int sender_key_distribution_message_serialize(signal_buffer **buffer, const send
 {
     int result = 0;
     uint8_t version = (CIPHERTEXT_CURRENT_VERSION << 4) | CIPHERTEXT_CURRENT_VERSION;
-    size_t result_size = 0;
     signal_buffer *result_buf = 0;
-    Textsecure__SenderKeyDistributionMessage message_structure = TEXTSECURE__SENDER_KEY_DISTRIBUTION_MESSAGE__INIT;
-    size_t len = 0;
-    uint8_t *data = 0;
+    upb_Arena *arena = 0;
+    textsecure_SenderKeyDistributionMessage *message_structure = 0;
+    upb_StringView signing_key;
 
-    message_structure.id = message->id;
-    message_structure.has_id = 1;
-
-    message_structure.iteration = message->iteration;
-    message_structure.has_iteration = 1;
-
-    message_structure.chainkey.data = signal_buffer_data(message->chain_key);
-    message_structure.chainkey.len = signal_buffer_len(message->chain_key);
-    message_structure.has_chainkey = 1;
-
-    result = ec_public_key_serialize_protobuf(&message_structure.signingkey, message->signature_key);
-    if(result < 0) {
-        goto complete;
-    }
-    message_structure.has_signingkey = 1;
-
-    len = textsecure__sender_key_distribution_message__get_packed_size(&message_structure);
-
-    result_buf = signal_buffer_alloc(sizeof(version) + len);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    message_structure = arena ? textsecure_SenderKeyDistributionMessage_new(arena) : 0;
+    if(!message_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    data[0] = version;
+    textsecure_SenderKeyDistributionMessage_set_id(message_structure, message->id);
+    textsecure_SenderKeyDistributionMessage_set_iteration(message_structure, message->iteration);
+    textsecure_SenderKeyDistributionMessage_set_chainKey(message_structure, signal_buffer_protobuf(message->chain_key));
 
-    result_size = textsecure__sender_key_distribution_message__pack(&message_structure, data + sizeof(version));
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
+    result = ec_public_key_serialize_protobuf(&signing_key, message->signature_key, arena);
+    if(result < 0) {
         goto complete;
     }
+    textsecure_SenderKeyDistributionMessage_set_signingKey(message_structure, signing_key);
+
+    result = signal_buffer_from_protobuf(&result_buf, message_structure,
+            &textsecure__SenderKeyDistributionMessage_msg_init, arena, sizeof(version), 0);
+    if(result < 0) {
+        goto complete;
+    }
+    signal_buffer_data(result_buf)[0] = version;
 
 complete:
-    if(message_structure.has_signingkey) {
-        free(message_structure.signingkey.data);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *buffer = result_buf;
@@ -1289,7 +1268,9 @@ int sender_key_distribution_message_deserialize(sender_key_distribution_message 
     uint8_t version = 0;
     const uint8_t *message_data = 0;
     size_t message_len = 0;
-    Textsecure__SenderKeyDistributionMessage *message_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_SenderKeyDistributionMessage *message_structure = 0;
+    upb_StringView field;
 
     assert(global_context);
 
@@ -1314,16 +1295,22 @@ int sender_key_distribution_message_deserialize(sender_key_distribution_message 
         goto complete;
     }
 
-    message_structure = textsecure__sender_key_distribution_message__unpack(0, message_len, message_data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    message_structure = textsecure_SenderKeyDistributionMessage_parse((const char *)message_data, message_len, arena);
     if(!message_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!message_structure->has_id
-            || !message_structure->has_iteration
-            || !message_structure->has_chainkey
-            || !message_structure->has_signingkey) {
+    if(!textsecure_SenderKeyDistributionMessage_has_id(message_structure)
+            || !textsecure_SenderKeyDistributionMessage_has_iteration(message_structure)
+            || !textsecure_SenderKeyDistributionMessage_has_chainKey(message_structure)
+            || !textsecure_SenderKeyDistributionMessage_has_signingKey(message_structure)) {
         signal_log(global_context, SG_LOG_WARNING, "Incomplete message");
         result = SG_ERR_INVALID_MESSAGE;
         goto complete;
@@ -1340,20 +1327,20 @@ int sender_key_distribution_message_deserialize(sender_key_distribution_message 
     result_message->base_message.message_type = CIPHERTEXT_SENDERKEY_DISTRIBUTION_TYPE;
     result_message->base_message.global_context = global_context;
 
-    result_message->id = message_structure->id;
-    result_message->iteration = message_structure->iteration;
+    result_message->id = textsecure_SenderKeyDistributionMessage_id(message_structure);
+    result_message->iteration = textsecure_SenderKeyDistributionMessage_iteration(message_structure);
 
-    result_message->chain_key = signal_buffer_create(
-            message_structure->chainkey.data,
-            message_structure->chainkey.len);
+    field = textsecure_SenderKeyDistributionMessage_chainKey(message_structure);
+    result_message->chain_key = signal_buffer_create((const uint8_t *)field.data, field.size);
     if(!result_message->chain_key) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
+    field = textsecure_SenderKeyDistributionMessage_signingKey(message_structure);
     result = curve_decode_point(&result_message->signature_key,
-            message_structure->signingkey.data,
-            message_structure->signingkey.len,
+            (const uint8_t *)field.data,
+            field.size,
             global_context);
     if(result < 0) {
         goto complete;
@@ -1366,8 +1353,8 @@ int sender_key_distribution_message_deserialize(sender_key_distribution_message 
     }
 
 complete:
-    if(message_structure) {
-        textsecure__sender_key_distribution_message__free_unpacked(message_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *message = result_message;

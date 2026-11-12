@@ -4,14 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include <protobuf-c/protobuf-c.h>
 
 #include "hkdf.h"
 #include "curve.h"
 #include "session_state.h"
 #include "protocol.h"
 #include "vpool.h"
-#include "LocalStorageProtocol.pb-c.h"
 #include "signal_protocol_internal.h"
 
 #define HASH_OUTPUT_SIZE 32
@@ -91,23 +89,13 @@ int ratchet_chain_key_get_key(const ratchet_chain_key *chain_key, signal_buffer 
     return 0;
 }
 
-int ratchet_chain_key_get_key_protobuf(const ratchet_chain_key *chain_key, ProtobufCBinaryData *buffer)
+int ratchet_chain_key_get_key_protobuf(const ratchet_chain_key *chain_key, upb_StringView *buffer, upb_Arena *arena)
 {
-    uint8_t *data = 0;
-
     assert(chain_key);
     assert(buffer);
 
-    data = malloc(chain_key->key_len);
-    if(!data) {
-        return SG_ERR_NOMEM;
-    }
-
-    memcpy(data, chain_key->key, chain_key->key_len);
-
-    buffer->data = data;
-    buffer->len = chain_key->key_len;
-    return 0;
+    *buffer = signal_protocol_bytes_protobuf(chain_key->key, chain_key->key_len, arena);
+    return buffer->data ? 0 : SG_ERR_NOMEM;
 }
 
 uint32_t ratchet_chain_key_get_index(const ratchet_chain_key *chain_key)
@@ -397,23 +385,13 @@ int ratchet_root_key_get_key(ratchet_root_key *root_key, signal_buffer **buffer)
     return 0;
 }
 
-int ratchet_root_key_get_key_protobuf(const ratchet_root_key *root_key, ProtobufCBinaryData *buffer)
+int ratchet_root_key_get_key_protobuf(const ratchet_root_key *root_key, upb_StringView *buffer, upb_Arena *arena)
 {
-    uint8_t *data = 0;
-
     assert(root_key);
     assert(buffer);
 
-    data = malloc(root_key->key_len);
-    if(!data) {
-        return SG_ERR_NOMEM;
-    }
-
-    memcpy(data, root_key->key, root_key->key_len);
-
-    buffer->data = data;
-    buffer->len = root_key->key_len;
-    return 0;
+    *buffer = signal_protocol_bytes_protobuf(root_key->key, root_key->key_len, arena);
+    return buffer->data ? 0 : SG_ERR_NOMEM;
 }
 
 int ratchet_root_key_compare(const ratchet_root_key *key1, const ratchet_root_key *key2)
@@ -479,51 +457,41 @@ int ratchet_identity_key_pair_create(
 int ratchet_identity_key_pair_serialize(signal_buffer **buffer, const ratchet_identity_key_pair *key_pair)
 {
     int result = 0;
-    size_t result_size = 0;
     signal_buffer *result_buf = 0;
-    Textsecure__IdentityKeyPairStructure key_structure = TEXTSECURE__IDENTITY_KEY_PAIR_STRUCTURE__INIT;
-    size_t len = 0;
-    uint8_t *data = 0;
+    upb_Arena *arena = 0;
+    textsecure_IdentityKeyPairStructure *key_structure = 0;
+    upb_StringView key;
 
     if(!key_pair) {
         result = SG_ERR_INVAL;
         goto complete;
     }
 
-    result = ec_public_key_serialize_protobuf(&key_structure.publickey, key_pair->public_key);
-    if(result < 0) {
-        goto complete;
-    }
-    key_structure.has_publickey = 1;
-
-    result = ec_private_key_serialize_protobuf(&key_structure.privatekey, key_pair->private_key);
-    if(result < 0) {
-        goto complete;
-    }
-    key_structure.has_privatekey = 1;
-
-    len = textsecure__identity_key_pair_structure__get_packed_size(&key_structure);
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
+    arena = upb_Arena_New();
+    key_structure = arena ? textsecure_IdentityKeyPairStructure_new(arena) : 0;
+    if(!key_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
 
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__identity_key_pair_structure__pack(&key_structure, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
+    result = ec_public_key_serialize_protobuf(&key, key_pair->public_key, arena);
+    if(result < 0) {
         goto complete;
     }
+    textsecure_IdentityKeyPairStructure_set_publicKey(key_structure, key);
+
+    result = ec_private_key_serialize_protobuf(&key, key_pair->private_key, arena);
+    if(result < 0) {
+        goto complete;
+    }
+    textsecure_IdentityKeyPairStructure_set_privateKey(key_structure, key);
+
+    result = signal_buffer_from_protobuf(&result_buf, key_structure,
+            &textsecure__IdentityKeyPairStructure_msg_init, arena, 0, 0);
 
 complete:
-    if(key_structure.has_publickey) {
-        free(key_structure.publickey.data);
-    }
-    if(key_structure.has_privatekey) {
-        free(key_structure.privatekey.data);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         result = 0;
@@ -538,33 +506,36 @@ int ratchet_identity_key_pair_deserialize(ratchet_identity_key_pair **key_pair, 
     ec_public_key *public_key = 0;
     ec_private_key *private_key = 0;
     ratchet_identity_key_pair *result_pair = 0;
-    Textsecure__IdentityKeyPairStructure *key_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_IdentityKeyPairStructure *key_structure = 0;
+    upb_StringView key;
 
-    key_structure = textsecure__identity_key_pair_structure__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    key_structure = textsecure_IdentityKeyPairStructure_parse((const char *)data, len, arena);
     if(!key_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!key_structure->has_publickey || !key_structure->has_privatekey) {
+    if(!textsecure_IdentityKeyPairStructure_has_publicKey(key_structure)
+            || !textsecure_IdentityKeyPairStructure_has_privateKey(key_structure)) {
         result = SG_ERR_INVALID_KEY;
         goto complete;
     }
 
-    result = curve_decode_point(
-            &public_key,
-            key_structure->publickey.data,
-            key_structure->publickey.len,
-            global_context);
+    key = textsecure_IdentityKeyPairStructure_publicKey(key_structure);
+    result = curve_decode_point(&public_key, (const uint8_t *)key.data, key.size, global_context);
     if(result < 0) {
         goto complete;
     }
 
-    result = curve_decode_private_point(
-            &private_key,
-            key_structure->privatekey.data,
-            key_structure->privatekey.len,
-            global_context);
+    key = textsecure_IdentityKeyPairStructure_privateKey(key_structure);
+    result = curve_decode_private_point(&private_key, (const uint8_t *)key.data, key.size, global_context);
     if(result < 0) {
         goto complete;
     }
@@ -575,8 +546,8 @@ int ratchet_identity_key_pair_deserialize(ratchet_identity_key_pair **key_pair, 
 complete:
     SIGNAL_UNREF(public_key);
     SIGNAL_UNREF(private_key);
-    if(key_structure) {
-        textsecure__identity_key_pair_structure__free_unpacked(key_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *key_pair = result_pair;

@@ -63,7 +63,7 @@ IF(COVERAGE)
 	add_custom_command(OUTPUT run_coverage
 			COMMAND ctest
 			COMMAND lcov -q --capture --directory src --output-file coverage.info.total
-			COMMAND lcov -q --remove coverage.info.total 'vpool.*' 'ut*.h' '*.pb-c.*' 'protobuf-c/*' 'curve25519/*' --output-file coverage.info
+			COMMAND lcov -q --remove coverage.info.total 'vpool.*' 'ut*.h' '*.upb*' '*/upb/*' 'curve25519/*' --output-file coverage.info
 			COMMAND genhtml -q coverage.info --output-directory coverage
 			COMMENT Collecting and creating coverage information
 	)

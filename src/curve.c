@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <protobuf-c/protobuf-c.h>
 
 #include "curve25519/curve25519-donna.h"
 #include "curve25519/ed25519/additions/curve_sigs.h"
@@ -130,7 +129,7 @@ int ec_public_key_serialize(signal_buffer **buffer, const ec_public_key *key)
     return 0;
 }
 
-int ec_public_key_serialize_protobuf(ProtobufCBinaryData *buffer, const ec_public_key *key)
+int ec_public_key_serialize_protobuf(upb_StringView *buffer, const ec_public_key *key, upb_Arena *arena)
 {
     size_t len = 0;
     uint8_t *data = 0;
@@ -139,7 +138,7 @@ int ec_public_key_serialize_protobuf(ProtobufCBinaryData *buffer, const ec_publi
     assert(key);
 
     len = sizeof(uint8_t) * (DJB_KEY_LEN + 1);
-    data = malloc(len);
+    data = upb_Arena_Malloc(arena, len);
     if(!data) {
         return SG_ERR_NOMEM;
     }
@@ -147,8 +146,7 @@ int ec_public_key_serialize_protobuf(ProtobufCBinaryData *buffer, const ec_publi
     data[0] = DJB_TYPE;
     memcpy(data + 1, key->data, DJB_KEY_LEN);
 
-    buffer->data = data;
-    buffer->len = len;
+    *buffer = upb_StringView_FromDataAndSize((const char *)data, len);
     return 0;
 }
 
@@ -215,25 +213,13 @@ int ec_private_key_serialize(signal_buffer **buffer, const ec_private_key *key)
     return 0;
 }
 
-int ec_private_key_serialize_protobuf(ProtobufCBinaryData *buffer, const ec_private_key *key)
+int ec_private_key_serialize_protobuf(upb_StringView *buffer, const ec_private_key *key, upb_Arena *arena)
 {
-    size_t len = 0;
-    uint8_t *data = 0;
-
     assert(buffer);
     assert(key);
 
-    len = sizeof(uint8_t) * DJB_KEY_LEN;
-    data = malloc(len);
-    if(!data) {
-        return SG_ERR_NOMEM;
-    }
-
-    memcpy(data, key->data, DJB_KEY_LEN);
-
-    buffer->data = data;
-    buffer->len = len;
-    return 0;
+    *buffer = signal_protocol_bytes_protobuf(key->data, sizeof(uint8_t) * DJB_KEY_LEN, arena);
+    return buffer->data ? 0 : SG_ERR_NOMEM;
 }
 
 void ec_private_key_destroy(signal_type_base *type)

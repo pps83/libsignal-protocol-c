@@ -5,7 +5,7 @@
 
 #include "signal_protocol_internal.h"
 #include "curve.h"
-#include "WhisperTextProtocol.pb-c.h"
+#include "WhisperTextProtocol.upb.h"
 #include "signal_utarray.h"
 
 #define CODE_VERSION 0
@@ -241,10 +241,8 @@ int device_consistency_message_create_from_pair(device_consistency_message **mes
     signal_buffer *signature_buffer = 0;
     signal_buffer *vrf_output_buffer = 0;
     signal_buffer *serialized_signature_buffer = 0;
-    Textsecure__DeviceConsistencyCodeMessage message_structure = TEXTSECURE__DEVICE_CONSISTENCY_CODE_MESSAGE__INIT;
-    size_t len = 0;
-    uint8_t *data = 0;
-    size_t result_size = 0;
+    upb_Arena *arena = 0;
+    textsecure_DeviceConsistencyCodeMessage *message_structure = 0;
 
     /* Create message instance */
     result = device_consistency_message_create(&result_message);
@@ -283,28 +281,24 @@ int device_consistency_message_create_from_pair(device_consistency_message **mes
     serialized_signature_buffer = device_consistency_signature_get_signature(result_message->signature);
 
     /* Serialize the message */
-    message_structure.generation = device_consistency_commitment_get_generation(commitment);
-    message_structure.has_generation = 1;
-    message_structure.signature.data = signal_buffer_data(serialized_signature_buffer);
-    message_structure.signature.len = signal_buffer_len(serialized_signature_buffer);
-    message_structure.has_signature = 1;
-
-    len = textsecure__device_consistency_code_message__get_packed_size(&message_structure);
-    result_message->serialized = signal_buffer_alloc(len);
-    if(!result_message->serialized) {
+    arena = upb_Arena_New();
+    message_structure = arena ? textsecure_DeviceConsistencyCodeMessage_new(arena) : 0;
+    if(!message_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
+    textsecure_DeviceConsistencyCodeMessage_set_generation(message_structure,
+            device_consistency_commitment_get_generation(commitment));
+    textsecure_DeviceConsistencyCodeMessage_set_signature(message_structure,
+            signal_buffer_protobuf(serialized_signature_buffer));
 
-    data = signal_buffer_data(result_message->serialized);
-
-    result_size = textsecure__device_consistency_code_message__pack(&message_structure, data);
-    if(result_size != len) {
-        result = SG_ERR_INVALID_PROTO_BUF;
-        goto complete;
-    }
+    result = signal_buffer_from_protobuf(&result_message->serialized, message_structure,
+            &textsecure__DeviceConsistencyCodeMessage_msg_init, arena, 0, 0);
 
 complete:
+    if(arena) {
+        upb_Arena_Free(arena);
+    }
     signal_buffer_free(signature_buffer);
     signal_buffer_free(vrf_output_buffer);
     if(result >= 0) {
@@ -327,7 +321,9 @@ int device_consistency_message_create_from_serialized(device_consistency_message
 {
     int result = 0;
     device_consistency_message *result_message = 0;
-    Textsecure__DeviceConsistencyCodeMessage *message_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_DeviceConsistencyCodeMessage *message_structure = 0;
+    upb_StringView signature;
     signal_buffer *commitment_buffer = 0;
     signal_buffer *vrf_output_buffer = 0;
 
@@ -338,32 +334,40 @@ int device_consistency_message_create_from_serialized(device_consistency_message
     }
 
     /* Deserialize the message */
-    message_structure = textsecure__device_consistency_code_message__unpack(0, serialized_len, serialized_data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    message_structure = textsecure_DeviceConsistencyCodeMessage_parse((const char *)serialized_data, serialized_len, arena);
     if(!message_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
 
-    if(!message_structure->has_generation || !message_structure->has_signature) {
+    if(!textsecure_DeviceConsistencyCodeMessage_has_generation(message_structure)
+            || !textsecure_DeviceConsistencyCodeMessage_has_signature(message_structure)) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
     }
+    signature = textsecure_DeviceConsistencyCodeMessage_signature(message_structure);
 
     /* Verify VRF signature */
     commitment_buffer = device_consistency_commitment_get_serialized(commitment);
     result = curve_verify_vrf_signature(global_context, &vrf_output_buffer,
             identity_key,
             signal_buffer_data(commitment_buffer), signal_buffer_len(commitment_buffer),
-            message_structure->signature.data, message_structure->signature.len);
+            (const uint8_t *)signature.data, signature.size);
     if(result < 0) {
         goto complete;
     }
 
     /* Assign the message fields */
-    result_message->generation = message_structure->generation;
+    result_message->generation = textsecure_DeviceConsistencyCodeMessage_generation(message_structure);
 
     result = device_consistency_signature_create(&result_message->signature,
-            message_structure->signature.data, message_structure->signature.len,
+            (const uint8_t *)signature.data, signature.size,
             signal_buffer_data(vrf_output_buffer), signal_buffer_len(vrf_output_buffer));
     if(result < 0) {
         goto complete;
@@ -375,8 +379,8 @@ int device_consistency_message_create_from_serialized(device_consistency_message
     }
 
 complete:
-    if(message_structure) {
-        textsecure__device_consistency_code_message__free_unpacked(message_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     signal_buffer_free(vrf_output_buffer);
     if(result >= 0) {

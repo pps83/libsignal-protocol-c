@@ -2,6 +2,11 @@ if(BUILD_SHARED_LIBS)
 	find_library(M_LIB m)
 endif()
 
+set(PROTOBUF_SOURCE_DIR "" CACHE PATH "Source tree of protobuf; its upb runtime is compiled into the library")
+if(NOT PROTOBUF_SOURCE_DIR)
+	message(FATAL_ERROR "Set PROTOBUF_SOURCE_DIR to a protobuf source tree that holds upb/")
+endif()
+
 include_directories(
 	.
 	curve25519/ed25519/nacl_includes
@@ -9,13 +14,41 @@ include_directories(
 	curve25519/ed25519/sha512
 	curve25519/ed25519
 	curve25519
+	${PROTOBUF_SOURCE_DIR}
+	${PROTOBUF_SOURCE_DIR}/third_party/utf8_range
 )
 
 set(protobuf_SRCS
-	LocalStorageProtocol.pb-c.c
-	WhisperTextProtocol.pb-c.c
-	FingerprintProtocol.pb-c.c
+	LocalStorageProtocol.upb_minitable.c
+	WhisperTextProtocol.upb_minitable.c
+	FingerprintProtocol.upb_minitable.c
+	${PROTOBUF_SOURCE_DIR}/upb/base/status.c
+	${PROTOBUF_SOURCE_DIR}/upb/hash/common.c
+	${PROTOBUF_SOURCE_DIR}/upb/mem/alloc.c
+	${PROTOBUF_SOURCE_DIR}/upb/mem/arena.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/array.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/map.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/map_sorter.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/message.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/unknown_fields.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/internal/extension.c
+	${PROTOBUF_SOURCE_DIR}/upb/message/internal/message.c
+	${PROTOBUF_SOURCE_DIR}/upb/mini_table/extension_registry.c
+	${PROTOBUF_SOURCE_DIR}/upb/mini_table/message.c
+	${PROTOBUF_SOURCE_DIR}/upb/port/port.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/decode.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/encode.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/eps_copy_input_stream.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/reader.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/internal/back_alloc.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/internal/decoder.c
+	${PROTOBUF_SOURCE_DIR}/upb/wire/internal/encoder.c
+	${PROTOBUF_SOURCE_DIR}/third_party/utf8_range/utf8_range.c
 )
+
+if(MSVC)
+	set_source_files_properties(${protobuf_SRCS} PROPERTIES COMPILE_OPTIONS /Zc:preprocessor)
+endif()
 
 set(signal_protocol_SRCS
 	vpool.c
@@ -62,13 +95,11 @@ set(signal_protocol_SRCS
 )
 
 add_subdirectory(curve25519)
-add_subdirectory(protobuf-c)
 
 add_library(signal-protocol-c
 	${protobuf_SRCS}
 	${signal_protocol_SRCS}
 	$<TARGET_OBJECTS:curve25519>
-	$<TARGET_OBJECTS:protobuf-c>
 )
 
 if(BUILD_SHARED_LIBS)

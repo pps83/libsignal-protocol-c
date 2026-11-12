@@ -7,7 +7,6 @@
 #include "hkdf.h"
 #include "curve.h"
 #include "ratchet.h"
-#include "LocalStorageProtocol.pb-c.h"
 #include "signal_protocol_internal.h"
 
 #include "utlist.h"
@@ -83,51 +82,50 @@ struct session_state
 
 static int session_state_serialize_prepare_sender_chain(
         session_state_sender_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure);
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena);
 static int session_state_serialize_prepare_receiver_chain(
         session_state_receiver_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure);
-static void session_state_serialize_prepare_chain_free(
-        Textsecure__SessionStructure__Chain *chain_structure);
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena);
 static int session_state_serialize_prepare_chain_chain_key(
         ratchet_chain_key *chain_key,
-        Textsecure__SessionStructure__Chain *chain_structure);
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena);
 static int session_state_serialize_prepare_chain_message_keys_list(
         message_keys_node *message_keys_head,
-        Textsecure__SessionStructure__Chain *chain_structure);
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena);
 static int session_state_serialize_prepare_message_keys(
         ratchet_message_keys *message_key,
-        Textsecure__SessionStructure__Chain__MessageKey *message_key_structure);
-static void session_state_serialize_prepare_message_keys_free(
-        Textsecure__SessionStructure__Chain__MessageKey *message_key_structure);
+        textsecure_SessionStructure_Chain_MessageKey *message_key_structure,
+        upb_Arena *arena);
 static int session_state_serialize_prepare_pending_key_exchange(
         session_pending_key_exchange *exchange,
-        Textsecure__SessionStructure__PendingKeyExchange *exchange_structure);
-static void session_state_serialize_prepare_pending_key_exchange_free(
-        Textsecure__SessionStructure__PendingKeyExchange *exchange_structure);
+        textsecure_SessionStructure_PendingKeyExchange *exchange_structure,
+        upb_Arena *arena);
 static int session_state_serialize_prepare_pending_pre_key(
         session_pending_pre_key *pre_key,
-        Textsecure__SessionStructure__PendingPreKey *pre_key_structure);
-static void session_state_serialize_prepare_pending_pre_key_free(
-        Textsecure__SessionStructure__PendingPreKey *pre_key_structure);
+        textsecure_SessionStructure_PendingPreKey *pre_key_structure,
+        upb_Arena *arena);
 
 static int session_state_deserialize_protobuf_pending_key_exchange(
         session_pending_key_exchange *result_exchange,
-        Textsecure__SessionStructure__PendingKeyExchange *exchange_structure,
+        const textsecure_SessionStructure_PendingKeyExchange *exchange_structure,
         signal_context *global_context);
 static int session_state_deserialize_protobuf_pending_pre_key(
         session_pending_pre_key *result_pre_key,
-        Textsecure__SessionStructure__PendingPreKey *pre_key_structure,
+        const textsecure_SessionStructure_PendingPreKey *pre_key_structure,
         signal_context *global_context);
 static int session_state_deserialize_protobuf_sender_chain(
         uint32_t session_version,
         session_state_sender_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure,
+        const textsecure_SessionStructure_Chain *chain_structure,
         signal_context *global_context);
 static int session_state_deserialize_protobuf_receiver_chain(
         uint32_t session_version,
         session_state_receiver_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure,
+        const textsecure_SessionStructure_Chain *chain_structure,
         signal_context *global_context);
 
 static void session_state_free_sender_chain(session_state *state);
@@ -153,44 +151,28 @@ int session_state_create(session_state **state, signal_context *global_context)
 int session_state_serialize(signal_buffer **buffer, session_state *state)
 {
     int result = 0;
-    size_t result_size = 0;
-    Textsecure__SessionStructure *state_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_SessionStructure *state_structure = 0;
     signal_buffer *result_buf = 0;
-    size_t len = 0;
-    uint8_t *data = 0;
 
-    state_structure = malloc(sizeof(Textsecure__SessionStructure));
+    arena = upb_Arena_New();
+    state_structure = arena ? textsecure_SessionStructure_new(arena) : 0;
     if(!state_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
-    textsecure__session_structure__init(state_structure);
 
-    result = session_state_serialize_prepare(state, state_structure);
+    result = session_state_serialize_prepare(state, state_structure, arena);
     if(result < 0) {
         goto complete;
     }
 
-    len = textsecure__session_structure__get_packed_size(state_structure);
-
-    result_buf = signal_buffer_alloc(len);
-    if(!result_buf) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
-
-    data = signal_buffer_data(result_buf);
-    result_size = textsecure__session_structure__pack(state_structure, data);
-    if(result_size != len) {
-        signal_buffer_free(result_buf);
-        result = SG_ERR_INVALID_PROTO_BUF;
-        result_buf = 0;
-        goto complete;
-    }
+    result = signal_buffer_from_protobuf(&result_buf, state_structure,
+            &textsecure__SessionStructure_msg_init, arena, 0, 0);
 
 complete:
-    if(state_structure) {
-        session_state_serialize_prepare_free(state_structure);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result >= 0) {
         *buffer = result_buf;
@@ -202,9 +184,16 @@ int session_state_deserialize(session_state **state, const uint8_t *data, size_t
 {
     int result = 0;
     session_state *result_state = 0;
-    Textsecure__SessionStructure *session_structure = 0;
+    upb_Arena *arena = 0;
+    textsecure_SessionStructure *session_structure = 0;
 
-    session_structure = textsecure__session_structure__unpack(0, len, data);
+    arena = upb_Arena_New();
+    if(!arena) {
+        result = SG_ERR_NOMEM;
+        goto complete;
+    }
+
+    session_structure = textsecure_SessionStructure_parse((const char *)data, len, arena);
     if(!session_structure) {
         result = SG_ERR_INVALID_PROTO_BUF;
         goto complete;
@@ -216,8 +205,8 @@ int session_state_deserialize(session_state **state, const uint8_t *data, size_t
     }
 
 complete:
-    if(session_structure) {
-        textsecure__session_structure__free_unpacked(session_structure, 0);
+    if(arena) {
+        upb_Arena_Free(arena);
     }
     if(result_state) {
         if(result < 0) {
@@ -230,142 +219,113 @@ complete:
     return result;
 }
 
-int session_state_serialize_prepare(session_state *state, Textsecure__SessionStructure *session_structure)
+int session_state_serialize_prepare(session_state *state, textsecure_SessionStructure *session_structure, upb_Arena *arena)
 {
     int result = 0;
+    upb_StringView field;
 
     assert(state);
     assert(session_structure);
 
-    session_structure->has_sessionversion = 1;
-    session_structure->sessionversion = state->session_version;
+    textsecure_SessionStructure_set_sessionVersion(session_structure, state->session_version);
 
     if(state->local_identity_public) {
-        result = ec_public_key_serialize_protobuf(
-                &session_structure->localidentitypublic, state->local_identity_public);
+        result = ec_public_key_serialize_protobuf(&field, state->local_identity_public, arena);
         if(result < 0) {
             goto complete;
         }
-        session_structure->has_localidentitypublic = 1;
+        textsecure_SessionStructure_set_localIdentityPublic(session_structure, field);
     }
 
     if(state->remote_identity_public) {
-        result = ec_public_key_serialize_protobuf(
-                &session_structure->remoteidentitypublic, state->remote_identity_public);
+        result = ec_public_key_serialize_protobuf(&field, state->remote_identity_public, arena);
         if(result < 0) {
             goto complete;
         }
-        session_structure->has_remoteidentitypublic = 1;
+        textsecure_SessionStructure_set_remoteIdentityPublic(session_structure, field);
     }
 
     if(state->root_key) {
-        result = ratchet_root_key_get_key_protobuf(
-                state->root_key, &session_structure->rootkey);
+        result = ratchet_root_key_get_key_protobuf(state->root_key, &field, arena);
         if(result < 0) {
             goto complete;
         }
-        session_structure->has_rootkey = 1;
+        textsecure_SessionStructure_set_rootKey(session_structure, field);
     }
 
-    session_structure->has_previouscounter = 1;
-    session_structure->previouscounter = state->previous_counter;
-
+    textsecure_SessionStructure_set_previousCounter(session_structure, state->previous_counter);
 
     if(state->has_sender_chain) {
-        session_structure->senderchain = malloc(sizeof(Textsecure__SessionStructure__Chain));
-        if(!session_structure->senderchain) {
+        textsecure_SessionStructure_Chain *chain_structure =
+                textsecure_SessionStructure_mutable_senderChain(session_structure, arena);
+        if(!chain_structure) {
             result = SG_ERR_NOMEM;
             goto complete;
         }
-        textsecure__session_structure__chain__init(session_structure->senderchain);
-        result = session_state_serialize_prepare_sender_chain(
-                &state->sender_chain, session_structure->senderchain);
+        result = session_state_serialize_prepare_sender_chain(&state->sender_chain, chain_structure, arena);
         if(result < 0) {
             goto complete;
         }
     }
 
     if(state->receiver_chain_head) {
-        size_t count, i = 0;
         session_state_receiver_chain *cur_node;
-        DL_COUNT(state->receiver_chain_head, cur_node, count);
-
-        if(count > SIZE_MAX / sizeof(Textsecure__SessionStructure__Chain *)) {
-            result = SG_ERR_NOMEM;
-            goto complete;
-        }
-
-        session_structure->receiverchains = malloc(sizeof(Textsecure__SessionStructure__Chain *) * count);
-        if(!session_structure->receiverchains) {
-            result = SG_ERR_NOMEM;
-            goto complete;
-        }
 
         DL_FOREACH(state->receiver_chain_head, cur_node) {
-            session_structure->receiverchains[i] = malloc(sizeof(Textsecure__SessionStructure__Chain));
-            if(!session_structure->receiverchains[i]) {
+            textsecure_SessionStructure_Chain *chain_structure =
+                    textsecure_SessionStructure_add_receiverChains(session_structure, arena);
+            if(!chain_structure) {
                 result = SG_ERR_NOMEM;
                 break;
             }
-            textsecure__session_structure__chain__init(session_structure->receiverchains[i]);
-            result = session_state_serialize_prepare_receiver_chain(cur_node, session_structure->receiverchains[i]);
+            result = session_state_serialize_prepare_receiver_chain(cur_node, chain_structure, arena);
             if(result < 0) {
                 break;
             }
-            i++;
         }
-        session_structure->n_receiverchains = i;
         if(result < 0) {
             goto complete;
         }
     }
 
     if(state->has_pending_key_exchange) {
-        session_structure->pendingkeyexchange = malloc(sizeof(Textsecure__SessionStructure__PendingKeyExchange));
-        if(!session_structure->pendingkeyexchange) {
+        textsecure_SessionStructure_PendingKeyExchange *exchange_structure =
+                textsecure_SessionStructure_mutable_pendingKeyExchange(session_structure, arena);
+        if(!exchange_structure) {
             result = SG_ERR_NOMEM;
             goto complete;
         }
-        textsecure__session_structure__pending_key_exchange__init(session_structure->pendingkeyexchange);
         result = session_state_serialize_prepare_pending_key_exchange(
-                &state->pending_key_exchange,
-                session_structure->pendingkeyexchange);
+                &state->pending_key_exchange, exchange_structure, arena);
         if(result < 0) {
             goto complete;
         }
     }
 
     if(state->has_pending_pre_key) {
-        session_structure->pendingprekey = malloc(sizeof(Textsecure__SessionStructure__PendingPreKey));
-        if(!session_structure->pendingprekey) {
+        textsecure_SessionStructure_PendingPreKey *pre_key_structure =
+                textsecure_SessionStructure_mutable_pendingPreKey(session_structure, arena);
+        if(!pre_key_structure) {
             result = SG_ERR_NOMEM;
             goto complete;
         }
-        textsecure__session_structure__pending_pre_key__init(session_structure->pendingprekey);
         result = session_state_serialize_prepare_pending_pre_key(
-                &state->pending_pre_key,
-                session_structure->pendingprekey);
+                &state->pending_pre_key, pre_key_structure, arena);
         if(result < 0) {
             goto complete;
         }
     }
 
-    session_structure->has_remoteregistrationid = 1;
-    session_structure->remoteregistrationid = state->remote_registration_id;
-
-    session_structure->has_localregistrationid = 1;
-    session_structure->localregistrationid = state->local_registration_id;
-
-    session_structure->has_needsrefresh = 1;
-    session_structure->needsrefresh = state->needs_refresh;
+    textsecure_SessionStructure_set_remoteRegistrationId(session_structure, state->remote_registration_id);
+    textsecure_SessionStructure_set_localRegistrationId(session_structure, state->local_registration_id);
+    textsecure_SessionStructure_set_needsRefresh(session_structure, state->needs_refresh);
 
     if(state->alice_base_key) {
-        result = ec_public_key_serialize_protobuf(
-                &session_structure->alicebasekey, state->alice_base_key);
+        result = ec_public_key_serialize_protobuf(&field, state->alice_base_key, arena);
         if(result < 0) {
             goto complete;
         }
-        session_structure->has_alicebasekey = 1;
+        textsecure_SessionStructure_set_aliceBaseKey(session_structure, field);
     }
 
 complete:
@@ -374,31 +334,33 @@ complete:
 
 static int session_state_serialize_prepare_sender_chain(
         session_state_sender_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure)
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena)
 {
     int result = 0;
+    upb_StringView field;
 
     if(chain->sender_ratchet_key_pair) {
         ec_public_key *public_key = 0;
         ec_private_key *private_key = 0;
 
         public_key = ec_key_pair_get_public(chain->sender_ratchet_key_pair);
-        result = ec_public_key_serialize_protobuf(&chain_structure->senderratchetkey, public_key);
+        result = ec_public_key_serialize_protobuf(&field, public_key, arena);
         if(result < 0) {
             goto complete;
         }
-        chain_structure->has_senderratchetkey = 1;
+        textsecure_SessionStructure_Chain_set_senderRatchetKey(chain_structure, field);
 
         private_key = ec_key_pair_get_private(chain->sender_ratchet_key_pair);
-        result = ec_private_key_serialize_protobuf(&chain_structure->senderratchetkeyprivate, private_key);
+        result = ec_private_key_serialize_protobuf(&field, private_key, arena);
         if(result < 0) {
             goto complete;
         }
-        chain_structure->has_senderratchetkeyprivate = 1;
+        textsecure_SessionStructure_Chain_set_senderRatchetKeyPrivate(chain_structure, field);
     }
 
     if(chain->chain_key) {
-        result = session_state_serialize_prepare_chain_chain_key(chain->chain_key, chain_structure);
+        result = session_state_serialize_prepare_chain_chain_key(chain->chain_key, chain_structure, arena);
         if(result < 0) {
             goto complete;
         }
@@ -410,27 +372,29 @@ complete:
 
 static int session_state_serialize_prepare_receiver_chain(
         session_state_receiver_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure)
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena)
 {
     int result = 0;
+    upb_StringView field;
 
     if(chain->sender_ratchet_key) {
-        result = ec_public_key_serialize_protobuf(&chain_structure->senderratchetkey, chain->sender_ratchet_key);
+        result = ec_public_key_serialize_protobuf(&field, chain->sender_ratchet_key, arena);
         if(result < 0) {
             goto complete;
         }
-        chain_structure->has_senderratchetkey = 1;
+        textsecure_SessionStructure_Chain_set_senderRatchetKey(chain_structure, field);
     }
 
     if(chain->chain_key) {
-        result = session_state_serialize_prepare_chain_chain_key(chain->chain_key, chain_structure);
+        result = session_state_serialize_prepare_chain_chain_key(chain->chain_key, chain_structure, arena);
         if(result < 0) {
             goto complete;
         }
     }
 
     if(chain->message_keys_head) {
-        result = session_state_serialize_prepare_chain_message_keys_list(chain->message_keys_head, chain_structure);
+        result = session_state_serialize_prepare_chain_message_keys_list(chain->message_keys_head, chain_structure, arena);
         if(result < 0) {
             goto complete;
         }
@@ -442,24 +406,25 @@ complete:
 
 static int session_state_serialize_prepare_chain_chain_key(
         ratchet_chain_key *chain_key,
-        Textsecure__SessionStructure__Chain *chain_structure)
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena)
 {
     int result = 0;
-    chain_structure->chainkey = malloc(sizeof(Textsecure__SessionStructure__Chain__ChainKey));
-    if(!chain_structure->chainkey) {
+    upb_StringView key;
+    textsecure_SessionStructure_Chain_ChainKey *key_structure =
+            textsecure_SessionStructure_Chain_mutable_chainKey(chain_structure, arena);
+    if(!key_structure) {
         result = SG_ERR_NOMEM;
         goto complete;
     }
-    textsecure__session_structure__chain__chain_key__init(chain_structure->chainkey);
 
-    chain_structure->chainkey->has_index = 1;
-    chain_structure->chainkey->index = ratchet_chain_key_get_index(chain_key);
+    textsecure_SessionStructure_Chain_ChainKey_set_index(key_structure, ratchet_chain_key_get_index(chain_key));
 
-    result = ratchet_chain_key_get_key_protobuf(chain_key, &chain_structure->chainkey->key);
+    result = ratchet_chain_key_get_key_protobuf(chain_key, &key, arena);
     if(result < 0) {
         goto complete;
     }
-    chain_structure->chainkey->has_key = 1;
+    textsecure_SessionStructure_Chain_ChainKey_set_key(key_structure, key);
 
 complete:
     return result;
@@ -467,132 +432,75 @@ complete:
 
 static int session_state_serialize_prepare_chain_message_keys_list(
         message_keys_node *message_keys_head,
-        Textsecure__SessionStructure__Chain *chain_structure)
+        textsecure_SessionStructure_Chain *chain_structure,
+        upb_Arena *arena)
 {
     int result = 0;
-    size_t count, i = 0;
     message_keys_node *cur_node;
-    DL_COUNT(message_keys_head, cur_node, count);
-
-    if(count == 0) {
-        goto complete;
-    }
-
-    if(count > SIZE_MAX / sizeof(Textsecure__SessionStructure__Chain__MessageKey *)) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
-
-    chain_structure->messagekeys = malloc(sizeof(Textsecure__SessionStructure__Chain__MessageKey *) * count);
-    if(!chain_structure->messagekeys) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
 
     DL_FOREACH(message_keys_head, cur_node) {
-        chain_structure->messagekeys[i] = malloc(sizeof(Textsecure__SessionStructure__Chain__MessageKey));
-        if(!chain_structure->messagekeys[i]) {
+        textsecure_SessionStructure_Chain_MessageKey *key_structure =
+                textsecure_SessionStructure_Chain_add_messageKeys(chain_structure, arena);
+        if(!key_structure) {
             result = SG_ERR_NOMEM;
             break;
         }
-        textsecure__session_structure__chain__message_key__init(chain_structure->messagekeys[i]);
 
-        result = session_state_serialize_prepare_message_keys(&cur_node->message_key, chain_structure->messagekeys[i]);
+        result = session_state_serialize_prepare_message_keys(&cur_node->message_key, key_structure, arena);
         if(result < 0) {
             break;
         }
-        i++;
-    }
-    chain_structure->n_messagekeys = i;
-    if(result < 0) {
-        goto complete;
     }
 
-complete:
     return result;
 }
 
 static int session_state_serialize_prepare_message_keys(
         ratchet_message_keys *message_key,
-        Textsecure__SessionStructure__Chain__MessageKey *message_key_structure)
+        textsecure_SessionStructure_Chain_MessageKey *message_key_structure,
+        upb_Arena *arena)
 {
-    int result = 0;
-
-    message_key_structure->has_index = 1;
-    message_key_structure->index = message_key->counter;
-
-    message_key_structure->cipherkey.data = malloc(sizeof(message_key->cipher_key));
-    if(!message_key_structure->cipherkey.data) {
-        result = SG_ERR_NOMEM;
-        goto complete;
+    upb_StringView cipher_key = signal_protocol_bytes_protobuf(message_key->cipher_key, sizeof(message_key->cipher_key), arena);
+    upb_StringView mac_key = signal_protocol_bytes_protobuf(message_key->mac_key, sizeof(message_key->mac_key), arena);
+    upb_StringView iv = signal_protocol_bytes_protobuf(message_key->iv, sizeof(message_key->iv), arena);
+    if(!cipher_key.data || !mac_key.data || !iv.data) {
+        return SG_ERR_NOMEM;
     }
-    memcpy(message_key_structure->cipherkey.data, message_key->cipher_key, sizeof(message_key->cipher_key));
-    message_key_structure->cipherkey.len = sizeof(message_key->cipher_key);
-    message_key_structure->has_cipherkey = 1;
 
-    message_key_structure->mackey.data = malloc(sizeof(message_key->mac_key));
-    if(!message_key_structure->mackey.data) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
-    memcpy(message_key_structure->mackey.data, message_key->mac_key, sizeof(message_key->mac_key));
-    message_key_structure->mackey.len = sizeof(message_key->mac_key);
-    message_key_structure->has_mackey = 1;
-
-    message_key_structure->iv.data = malloc(sizeof(message_key->iv));
-    if(!message_key_structure->iv.data) {
-        result = SG_ERR_NOMEM;
-        goto complete;
-    }
-    memcpy(message_key_structure->iv.data, message_key->iv, sizeof(message_key->iv));
-    message_key_structure->iv.len = sizeof(message_key->iv);
-    message_key_structure->has_iv = 1;
-
-complete:
-    return result;
-}
-
-static void session_state_serialize_prepare_message_keys_free(
-        Textsecure__SessionStructure__Chain__MessageKey *message_key_structure)
-{
-    if(message_key_structure->has_cipherkey) {
-        free(message_key_structure->cipherkey.data);
-    }
-    if(message_key_structure->has_mackey) {
-        free(message_key_structure->mackey.data);
-    }
-    if(message_key_structure->has_iv) {
-        free(message_key_structure->iv.data);
-    }
-    free(message_key_structure);
+    textsecure_SessionStructure_Chain_MessageKey_set_index(message_key_structure, message_key->counter);
+    textsecure_SessionStructure_Chain_MessageKey_set_cipherKey(message_key_structure, cipher_key);
+    textsecure_SessionStructure_Chain_MessageKey_set_macKey(message_key_structure, mac_key);
+    textsecure_SessionStructure_Chain_MessageKey_set_iv(message_key_structure, iv);
+    return 0;
 }
 
 static int session_state_serialize_prepare_pending_key_exchange(
         session_pending_key_exchange *exchange,
-        Textsecure__SessionStructure__PendingKeyExchange *exchange_structure)
+        textsecure_SessionStructure_PendingKeyExchange *exchange_structure,
+        upb_Arena *arena)
 {
     int result = 0;
+    upb_StringView field;
 
-    exchange_structure->has_sequence = 1;
-    exchange_structure->sequence = exchange->sequence;
+    textsecure_SessionStructure_PendingKeyExchange_set_sequence(exchange_structure, exchange->sequence);
 
     if(exchange->local_base_key) {
         ec_public_key *public_key = 0;
         ec_private_key *private_key = 0;
 
         public_key = ec_key_pair_get_public(exchange->local_base_key);
-        result = ec_public_key_serialize_protobuf(&exchange_structure->localbasekey, public_key);
+        result = ec_public_key_serialize_protobuf(&field, public_key, arena);
         if(result < 0) {
             goto complete;
         }
-        exchange_structure->has_localbasekey = 1;
+        textsecure_SessionStructure_PendingKeyExchange_set_localBaseKey(exchange_structure, field);
 
         private_key = ec_key_pair_get_private(exchange->local_base_key);
-        result = ec_private_key_serialize_protobuf(&exchange_structure->localbasekeyprivate, private_key);
+        result = ec_private_key_serialize_protobuf(&field, private_key, arena);
         if(result < 0) {
             goto complete;
         }
-        exchange_structure->has_localbasekeyprivate = 1;
+        textsecure_SessionStructure_PendingKeyExchange_set_localBaseKeyPrivate(exchange_structure, field);
     }
 
     if(exchange->local_ratchet_key) {
@@ -600,18 +508,18 @@ static int session_state_serialize_prepare_pending_key_exchange(
         ec_private_key *private_key;
 
         public_key = ec_key_pair_get_public(exchange->local_ratchet_key);
-        result = ec_public_key_serialize_protobuf(&exchange_structure->localratchetkey, public_key);
+        result = ec_public_key_serialize_protobuf(&field, public_key, arena);
         if(result < 0) {
             goto complete;
         }
-        exchange_structure->has_localratchetkey = 1;
+        textsecure_SessionStructure_PendingKeyExchange_set_localRatchetKey(exchange_structure, field);
 
         private_key = ec_key_pair_get_private(exchange->local_ratchet_key);
-        result = ec_private_key_serialize_protobuf(&exchange_structure->localratchetkeyprivate, private_key);
+        result = ec_private_key_serialize_protobuf(&field, private_key, arena);
         if(result < 0) {
             goto complete;
         }
-        exchange_structure->has_localratchetkeyprivate = 1;
+        textsecure_SessionStructure_PendingKeyExchange_set_localRatchetKeyPrivate(exchange_structure, field);
     }
 
     if(exchange->local_identity_key) {
@@ -619,18 +527,18 @@ static int session_state_serialize_prepare_pending_key_exchange(
         ec_private_key *private_key;
 
         public_key = ratchet_identity_key_pair_get_public(exchange->local_identity_key);
-        result = ec_public_key_serialize_protobuf(&exchange_structure->localidentitykey, public_key);
+        result = ec_public_key_serialize_protobuf(&field, public_key, arena);
         if(result < 0) {
             goto complete;
         }
-        exchange_structure->has_localidentitykey = 1;
+        textsecure_SessionStructure_PendingKeyExchange_set_localIdentityKey(exchange_structure, field);
 
         private_key = ratchet_identity_key_pair_get_private(exchange->local_identity_key);
-        result = ec_private_key_serialize_protobuf(&exchange_structure->localidentitykeyprivate, private_key);
+        result = ec_private_key_serialize_protobuf(&field, private_key, arena);
         if(result < 0) {
             goto complete;
         }
-        exchange_structure->has_localidentitykeyprivate = 1;
+        textsecure_SessionStructure_PendingKeyExchange_set_localIdentityKeyPrivate(exchange_structure, field);
     }
 
 complete:
@@ -639,197 +547,94 @@ complete:
 
 static int session_state_serialize_prepare_pending_pre_key(
         session_pending_pre_key *pre_key,
-        Textsecure__SessionStructure__PendingPreKey *pre_key_structure)
+        textsecure_SessionStructure_PendingPreKey *pre_key_structure,
+        upb_Arena *arena)
 {
     int result = 0;
+    upb_StringView field;
 
     if(pre_key->has_pre_key_id) {
-        pre_key_structure->has_prekeyid = 1;
-        pre_key_structure->prekeyid = pre_key->pre_key_id;
+        textsecure_SessionStructure_PendingPreKey_set_preKeyId(pre_key_structure, pre_key->pre_key_id);
     }
 
-    pre_key_structure->has_signedprekeyid = 1;
-    pre_key_structure->signedprekeyid = (int32_t)pre_key->signed_pre_key_id;
+    textsecure_SessionStructure_PendingPreKey_set_signedPreKeyId(pre_key_structure, (int32_t)pre_key->signed_pre_key_id);
 
     if(pre_key->base_key) {
-        result = ec_public_key_serialize_protobuf(&pre_key_structure->basekey, pre_key->base_key);
+        result = ec_public_key_serialize_protobuf(&field, pre_key->base_key, arena);
         if(result < 0) {
             goto complete;
         }
-        pre_key_structure->has_basekey = 1;
+        textsecure_SessionStructure_PendingPreKey_set_baseKey(pre_key_structure, field);
     }
 
 complete:
     return result;
 }
 
-void session_state_serialize_prepare_free(Textsecure__SessionStructure *session_structure)
-{
-    assert(session_structure);
-
-    if(session_structure->has_localidentitypublic) {
-        free(session_structure->localidentitypublic.data);
-    }
-
-    if(session_structure->has_remoteidentitypublic) {
-        free(session_structure->remoteidentitypublic.data);
-    }
-
-    if(session_structure->has_rootkey) {
-        free(session_structure->rootkey.data);
-    }
-
-    if(session_structure->senderchain) {
-        session_state_serialize_prepare_chain_free(session_structure->senderchain);
-    }
-
-    if(session_structure->receiverchains) {
-        unsigned int i;
-        for(i = 0; i < session_structure->n_receiverchains; i++) {
-            if(session_structure->receiverchains[i]) {
-                session_state_serialize_prepare_chain_free(session_structure->receiverchains[i]);
-            }
-        }
-        free(session_structure->receiverchains);
-    }
-
-    if(session_structure->pendingkeyexchange) {
-        session_state_serialize_prepare_pending_key_exchange_free(session_structure->pendingkeyexchange);
-    }
-
-    if(session_structure->pendingprekey) {
-        session_state_serialize_prepare_pending_pre_key_free(session_structure->pendingprekey);
-    }
-
-    if(session_structure->has_alicebasekey) {
-        free(session_structure->alicebasekey.data);
-    }
-
-    free(session_structure);
-}
-
-static void session_state_serialize_prepare_chain_free(
-        Textsecure__SessionStructure__Chain *chain_structure)
-{
-    if(chain_structure->has_senderratchetkey) {
-        free(chain_structure->senderratchetkey.data);
-    }
-    if(chain_structure->has_senderratchetkeyprivate) {
-        free(chain_structure->senderratchetkeyprivate.data);
-    }
-    if(chain_structure->chainkey) {
-        if(chain_structure->chainkey->has_key) {
-            free(chain_structure->chainkey->key.data);
-        }
-        free(chain_structure->chainkey);
-    }
-    if(chain_structure->messagekeys) {
-        unsigned int i;
-        for(i = 0; i < chain_structure->n_messagekeys; i++) {
-            if(chain_structure->messagekeys[i]) {
-                session_state_serialize_prepare_message_keys_free(chain_structure->messagekeys[i]);
-            }
-        }
-        free(chain_structure->messagekeys);
-    }
-    free(chain_structure);
-}
-
-static void session_state_serialize_prepare_pending_key_exchange_free(
-        Textsecure__SessionStructure__PendingKeyExchange *exchange_structure)
-{
-    if(exchange_structure->has_localbasekey) {
-        free(exchange_structure->localbasekey.data);
-    }
-    if(exchange_structure->has_localbasekeyprivate) {
-        free(exchange_structure->localbasekeyprivate.data);
-    }
-    if(exchange_structure->has_localratchetkey) {
-        free(exchange_structure->localratchetkey.data);
-    }
-    if(exchange_structure->has_localratchetkeyprivate) {
-        free(exchange_structure->localratchetkeyprivate.data);
-    }
-    if(exchange_structure->has_localidentitykey) {
-        free(exchange_structure->localidentitykey.data);
-    }
-    if(exchange_structure->has_localidentitykeyprivate) {
-        free(exchange_structure->localidentitykeyprivate.data);
-    }
-    free(exchange_structure);
-}
-
-static void session_state_serialize_prepare_pending_pre_key_free(
-        Textsecure__SessionStructure__PendingPreKey *pre_key_structure)
-{
-    if(pre_key_structure->has_basekey) {
-        free(pre_key_structure->basekey.data);
-    }
-
-    free(pre_key_structure);
-}
-
-int session_state_deserialize_protobuf(session_state **state, Textsecure__SessionStructure *session_structure, signal_context *global_context)
+int session_state_deserialize_protobuf(session_state **state, const textsecure_SessionStructure *session_structure, signal_context *global_context)
 {
     int result = 0;
     session_state *result_state  = 0;
+    upb_StringView field;
+    const textsecure_SessionStructure_Chain *const *receiver_chains = 0;
+    size_t receiver_chain_count = 0;
 
     result = session_state_create(&result_state, global_context);
     if(result < 0) {
         goto complete;
     }
 
-    if(session_structure->has_sessionversion) {
-        result_state->session_version = session_structure->sessionversion;
+    if(textsecure_SessionStructure_has_sessionVersion(session_structure)) {
+        result_state->session_version = textsecure_SessionStructure_sessionVersion(session_structure);
     }
 
-    if(session_structure->has_localidentitypublic) {
+    if(textsecure_SessionStructure_has_localIdentityPublic(session_structure)) {
+        field = textsecure_SessionStructure_localIdentityPublic(session_structure);
         result = curve_decode_point(
                 &result_state->local_identity_public,
-                session_structure->localidentitypublic.data,
-                session_structure->localidentitypublic.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(session_structure->has_remoteidentitypublic) {
+    if(textsecure_SessionStructure_has_remoteIdentityPublic(session_structure)) {
+        field = textsecure_SessionStructure_remoteIdentityPublic(session_structure);
         result = curve_decode_point(
                 &result_state->remote_identity_public,
-                session_structure->remoteidentitypublic.data,
-                session_structure->remoteidentitypublic.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(session_structure->has_rootkey) {
+    if(textsecure_SessionStructure_has_rootKey(session_structure)) {
         hkdf_context *kdf = 0;
         result = hkdf_create(&kdf, (int)result_state->session_version, global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_rootKey(session_structure);
         result = ratchet_root_key_create(
                 &result_state->root_key, kdf,
-                session_structure->rootkey.data,
-                session_structure->rootkey.len, global_context);
+                (const uint8_t *)field.data, field.size, global_context);
         SIGNAL_UNREF(kdf);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(session_structure->has_previouscounter) {
-        result_state->previous_counter = session_structure->previouscounter;
+    if(textsecure_SessionStructure_has_previousCounter(session_structure)) {
+        result_state->previous_counter = textsecure_SessionStructure_previousCounter(session_structure);
     }
 
-    if(session_structure->senderchain) {
+    if(textsecure_SessionStructure_has_senderChain(session_structure)) {
         session_state_deserialize_protobuf_sender_chain(
                 result_state->session_version,
-                &result_state->sender_chain, session_structure->senderchain,
+                &result_state->sender_chain, textsecure_SessionStructure_senderChain(session_structure),
                 global_context);
         if(result < 0) {
             goto complete;
@@ -837,9 +642,10 @@ int session_state_deserialize_protobuf(session_state **state, Textsecure__Sessio
         result_state->has_sender_chain = 1;
     }
 
-    if(session_structure->n_receiverchains > 0) {
-        unsigned int i;
-        for(i = 0; i < session_structure->n_receiverchains; i++) {
+    receiver_chains = textsecure_SessionStructure_receiverChains(session_structure, &receiver_chain_count);
+    if(receiver_chain_count > 0) {
+        size_t i;
+        for(i = 0; i < receiver_chain_count; i++) {
             session_state_receiver_chain *node = malloc(sizeof(session_state_receiver_chain));
             if(!node) {
                 result = SG_ERR_NOMEM;
@@ -849,7 +655,7 @@ int session_state_deserialize_protobuf(session_state **state, Textsecure__Sessio
 
             result = session_state_deserialize_protobuf_receiver_chain(
                     result_state->session_version,
-                    node, session_structure->receiverchains[i],
+                    node, receiver_chains[i],
                     global_context);
             if(result < 0) {
                 free(node);
@@ -860,43 +666,43 @@ int session_state_deserialize_protobuf(session_state **state, Textsecure__Sessio
         }
     }
 
-    if(session_structure->pendingkeyexchange) {
+    if(textsecure_SessionStructure_has_pendingKeyExchange(session_structure)) {
         result = session_state_deserialize_protobuf_pending_key_exchange(
                 &result_state->pending_key_exchange,
-                session_structure->pendingkeyexchange, global_context);
+                textsecure_SessionStructure_pendingKeyExchange(session_structure), global_context);
         if(result < 0) {
             goto complete;
         }
         result_state->has_pending_key_exchange = 1;
     }
 
-    if(session_structure->pendingprekey) {
+    if(textsecure_SessionStructure_has_pendingPreKey(session_structure)) {
         result = session_state_deserialize_protobuf_pending_pre_key(
                 &result_state->pending_pre_key,
-                session_structure->pendingprekey, global_context);
+                textsecure_SessionStructure_pendingPreKey(session_structure), global_context);
         if(result < 0) {
             goto complete;
         }
         result_state->has_pending_pre_key = 1;
     }
 
-    if(session_structure->has_remoteregistrationid) {
-        result_state->remote_registration_id = session_structure->remoteregistrationid;
+    if(textsecure_SessionStructure_has_remoteRegistrationId(session_structure)) {
+        result_state->remote_registration_id = textsecure_SessionStructure_remoteRegistrationId(session_structure);
     }
 
-    if(session_structure->has_localregistrationid) {
-        result_state->local_registration_id = session_structure->localregistrationid;
+    if(textsecure_SessionStructure_has_localRegistrationId(session_structure)) {
+        result_state->local_registration_id = textsecure_SessionStructure_localRegistrationId(session_structure);
     }
 
-    if(session_structure->has_needsrefresh) {
-        result_state->needs_refresh = session_structure->needsrefresh;
+    if(textsecure_SessionStructure_has_needsRefresh(session_structure)) {
+        result_state->needs_refresh = textsecure_SessionStructure_needsRefresh(session_structure);
     }
 
-    if(session_structure->has_alicebasekey) {
+    if(textsecure_SessionStructure_has_aliceBaseKey(session_structure)) {
+        field = textsecure_SessionStructure_aliceBaseKey(session_structure);
         result = curve_decode_point(
                 &result_state->alice_base_key,
-                session_structure->alicebasekey.data,
-                session_structure->alicebasekey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -917,10 +723,11 @@ complete:
 
 static int session_state_deserialize_protobuf_pending_key_exchange(
         session_pending_key_exchange *result_exchange,
-        Textsecure__SessionStructure__PendingKeyExchange *exchange_structure,
+        const textsecure_SessionStructure_PendingKeyExchange *exchange_structure,
         signal_context *global_context)
 {
     int result = 0;
+    upb_StringView field;
 
     ec_key_pair *local_base_key = 0;
     ec_public_key *local_base_key_public = 0;
@@ -934,18 +741,19 @@ static int session_state_deserialize_protobuf_pending_key_exchange(
     ec_public_key *local_identity_key_public = 0;
     ec_private_key *local_identity_key_private = 0;
 
-    if(exchange_structure->has_localbasekey && exchange_structure->has_localbasekeyprivate) {
+    if(textsecure_SessionStructure_PendingKeyExchange_has_localBaseKey(exchange_structure)
+            && textsecure_SessionStructure_PendingKeyExchange_has_localBaseKeyPrivate(exchange_structure)) {
+        field = textsecure_SessionStructure_PendingKeyExchange_localBaseKey(exchange_structure);
         result = curve_decode_point(&local_base_key_public,
-                exchange_structure->localbasekey.data,
-                exchange_structure->localbasekey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_PendingKeyExchange_localBaseKeyPrivate(exchange_structure);
         result = curve_decode_private_point(&local_base_key_private,
-                exchange_structure->localbasekeyprivate.data,
-                exchange_structure->localbasekeyprivate.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -958,18 +766,19 @@ static int session_state_deserialize_protobuf_pending_key_exchange(
         }
     }
 
-    if(exchange_structure->has_localratchetkey && exchange_structure->has_localratchetkeyprivate) {
+    if(textsecure_SessionStructure_PendingKeyExchange_has_localRatchetKey(exchange_structure)
+            && textsecure_SessionStructure_PendingKeyExchange_has_localRatchetKeyPrivate(exchange_structure)) {
+        field = textsecure_SessionStructure_PendingKeyExchange_localRatchetKey(exchange_structure);
         result = curve_decode_point(&local_ratchet_key_public,
-                exchange_structure->localratchetkey.data,
-                exchange_structure->localratchetkey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_PendingKeyExchange_localRatchetKeyPrivate(exchange_structure);
         result = curve_decode_private_point(&local_ratchet_key_private,
-                exchange_structure->localratchetkeyprivate.data,
-                exchange_structure->localratchetkeyprivate.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -982,18 +791,19 @@ static int session_state_deserialize_protobuf_pending_key_exchange(
         }
     }
 
-    if(exchange_structure->has_localidentitykey && exchange_structure->has_localidentitykeyprivate) {
+    if(textsecure_SessionStructure_PendingKeyExchange_has_localIdentityKey(exchange_structure)
+            && textsecure_SessionStructure_PendingKeyExchange_has_localIdentityKeyPrivate(exchange_structure)) {
+        field = textsecure_SessionStructure_PendingKeyExchange_localIdentityKey(exchange_structure);
         result = curve_decode_point(&local_identity_key_public,
-                exchange_structure->localidentitykey.data,
-                exchange_structure->localidentitykey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_PendingKeyExchange_localIdentityKeyPrivate(exchange_structure);
         result = curve_decode_private_point(&local_identity_key_private,
-                exchange_structure->localidentitykeyprivate.data,
-                exchange_structure->localidentitykeyprivate.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -1007,7 +817,7 @@ static int session_state_deserialize_protobuf_pending_key_exchange(
         }
     }
 
-    result_exchange->sequence = exchange_structure->sequence;
+    result_exchange->sequence = textsecure_SessionStructure_PendingKeyExchange_sequence(exchange_structure);
     result_exchange->local_base_key = local_base_key;
     result_exchange->local_ratchet_key = local_ratchet_key;
     result_exchange->local_identity_key = local_identity_key;
@@ -1031,16 +841,16 @@ complete:
 
 static int session_state_deserialize_protobuf_pending_pre_key(
         session_pending_pre_key *result_pre_key,
-        Textsecure__SessionStructure__PendingPreKey *pre_key_structure,
+        const textsecure_SessionStructure_PendingPreKey *pre_key_structure,
         signal_context *global_context)
 {
     int result = 0;
 
-    if(pre_key_structure->has_basekey) {
+    if(textsecure_SessionStructure_PendingPreKey_has_baseKey(pre_key_structure)) {
         ec_public_key *base_key = 0;
+        upb_StringView field = textsecure_SessionStructure_PendingPreKey_baseKey(pre_key_structure);
         result = curve_decode_point(&base_key,
-                pre_key_structure->basekey.data,
-                pre_key_structure->basekey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -1048,13 +858,14 @@ static int session_state_deserialize_protobuf_pending_pre_key(
         result_pre_key->base_key = base_key;
     }
 
-    if(pre_key_structure->has_prekeyid) {
+    if(textsecure_SessionStructure_PendingPreKey_has_preKeyId(pre_key_structure)) {
         result_pre_key->has_pre_key_id = 1;
-        result_pre_key->pre_key_id = pre_key_structure->prekeyid;
+        result_pre_key->pre_key_id = textsecure_SessionStructure_PendingPreKey_preKeyId(pre_key_structure);
     }
 
-    if(pre_key_structure->has_signedprekeyid) {
-        result_pre_key->signed_pre_key_id = (uint32_t)pre_key_structure->signedprekeyid;
+    if(textsecure_SessionStructure_PendingPreKey_has_signedPreKeyId(pre_key_structure)) {
+        result_pre_key->signed_pre_key_id =
+                (uint32_t)textsecure_SessionStructure_PendingPreKey_signedPreKeyId(pre_key_structure);
     }
 
 complete:
@@ -1064,7 +875,7 @@ complete:
 static int session_state_deserialize_protobuf_sender_chain(
         uint32_t session_version,
         session_state_sender_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure,
+        const textsecure_SessionStructure_Chain *chain_structure,
         signal_context *global_context)
 {
     int result = 0;
@@ -1073,19 +884,23 @@ static int session_state_deserialize_protobuf_sender_chain(
     ec_public_key *sender_ratchet_key_public = 0;
     ec_private_key *sender_ratchet_key_private = 0;
     ratchet_chain_key *sender_chain_key = 0;
+    const textsecure_SessionStructure_Chain_ChainKey *key_structure =
+            textsecure_SessionStructure_Chain_chainKey(chain_structure);
+    upb_StringView field;
 
-    if(chain_structure->has_senderratchetkey && chain_structure->has_senderratchetkeyprivate) {
+    if(textsecure_SessionStructure_Chain_has_senderRatchetKey(chain_structure)
+            && textsecure_SessionStructure_Chain_has_senderRatchetKeyPrivate(chain_structure)) {
+        field = textsecure_SessionStructure_Chain_senderRatchetKey(chain_structure);
         result = curve_decode_point(&sender_ratchet_key_public,
-                chain_structure->senderratchetkey.data,
-                chain_structure->senderratchetkey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_Chain_senderRatchetKeyPrivate(chain_structure);
         result = curve_decode_private_point(&sender_ratchet_key_private,
-                chain_structure->senderratchetkeyprivate.data,
-                chain_structure->senderratchetkeyprivate.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
@@ -1098,17 +913,18 @@ static int session_state_deserialize_protobuf_sender_chain(
         }
     }
 
-    if(chain_structure->chainkey && chain_structure->chainkey->has_key && chain_structure->chainkey->has_index) {
+    if(key_structure && textsecure_SessionStructure_Chain_ChainKey_has_key(key_structure)
+            && textsecure_SessionStructure_Chain_ChainKey_has_index(key_structure)) {
         result = hkdf_create(&kdf, (int)session_version, global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_Chain_ChainKey_key(key_structure);
         result = ratchet_chain_key_create(
                 &sender_chain_key, kdf,
-                chain_structure->chainkey->key.data,
-                chain_structure->chainkey->key.len,
-                chain_structure->chainkey->index,
+                (const uint8_t *)field.data, field.size,
+                textsecure_SessionStructure_Chain_ChainKey_index(key_structure),
                 global_context);
         if(result < 0) {
             goto complete;
@@ -1132,7 +948,7 @@ complete:
 static int session_state_deserialize_protobuf_receiver_chain(
         uint32_t session_version,
         session_state_receiver_chain *chain,
-        Textsecure__SessionStructure__Chain *chain_structure,
+        const textsecure_SessionStructure_Chain *chain_structure,
         signal_context *global_context)
 {
     int result = 0;
@@ -1141,39 +957,45 @@ static int session_state_deserialize_protobuf_receiver_chain(
     ec_public_key *sender_ratchet_key = 0;
     ratchet_chain_key *chain_key = 0;
     message_keys_node *message_keys_head = 0;
+    const textsecure_SessionStructure_Chain_ChainKey *chain_key_structure =
+            textsecure_SessionStructure_Chain_chainKey(chain_structure);
+    const textsecure_SessionStructure_Chain_MessageKey *const *message_keys = 0;
+    size_t message_key_count = 0;
+    upb_StringView field;
 
-    if(chain_structure->has_senderratchetkey) {
+    if(textsecure_SessionStructure_Chain_has_senderRatchetKey(chain_structure)) {
+        field = textsecure_SessionStructure_Chain_senderRatchetKey(chain_structure);
         result = curve_decode_point(&sender_ratchet_key,
-                chain_structure->senderratchetkey.data,
-                chain_structure->senderratchetkey.len,
+                (const uint8_t *)field.data, field.size,
                 global_context);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(chain_structure->chainkey && chain_structure->chainkey->has_key && chain_structure->chainkey->has_index) {
+    if(chain_key_structure && textsecure_SessionStructure_Chain_ChainKey_has_key(chain_key_structure)
+            && textsecure_SessionStructure_Chain_ChainKey_has_index(chain_key_structure)) {
         result = hkdf_create(&kdf, (int)session_version, global_context);
         if(result < 0) {
             goto complete;
         }
 
+        field = textsecure_SessionStructure_Chain_ChainKey_key(chain_key_structure);
         result = ratchet_chain_key_create(
                 &chain_key, kdf,
-                chain_structure->chainkey->key.data,
-                chain_structure->chainkey->key.len,
-                chain_structure->chainkey->index,
+                (const uint8_t *)field.data, field.size,
+                textsecure_SessionStructure_Chain_ChainKey_index(chain_key_structure),
                 global_context);
         if(result < 0) {
             goto complete;
         }
     }
 
-    if(chain_structure->n_messagekeys > 0) {
-        unsigned int i;
-        for(i = 0; i < chain_structure->n_messagekeys; i++) {
-            Textsecure__SessionStructure__Chain__MessageKey *key_structure =
-                    chain_structure->messagekeys[i];
+    message_keys = textsecure_SessionStructure_Chain_messageKeys(chain_structure, &message_key_count);
+    if(message_key_count > 0) {
+        size_t i;
+        for(i = 0; i < message_key_count; i++) {
+            const textsecure_SessionStructure_Chain_MessageKey *key_structure = message_keys[i];
 
             message_keys_node *node = malloc(sizeof(message_keys_node));
             if(!node) {
@@ -1182,17 +1004,23 @@ static int session_state_deserialize_protobuf_receiver_chain(
             }
             memset(node, 0, sizeof(message_keys_node));
 
-            if(key_structure->has_index) {
-                node->message_key.counter = key_structure->index;
+            if(textsecure_SessionStructure_Chain_MessageKey_has_index(key_structure)) {
+                node->message_key.counter = textsecure_SessionStructure_Chain_MessageKey_index(key_structure);
             }
-            if(key_structure->has_cipherkey && key_structure->cipherkey.len == sizeof(node->message_key.cipher_key)) {
-                memcpy(node->message_key.cipher_key, key_structure->cipherkey.data, key_structure->cipherkey.len);
+            field = textsecure_SessionStructure_Chain_MessageKey_cipherKey(key_structure);
+            if(textsecure_SessionStructure_Chain_MessageKey_has_cipherKey(key_structure)
+                    && field.size == sizeof(node->message_key.cipher_key)) {
+                memcpy(node->message_key.cipher_key, field.data, field.size);
             }
-            if(key_structure->has_mackey && key_structure->mackey.len == sizeof(node->message_key.mac_key)) {
-                memcpy(node->message_key.mac_key, key_structure->mackey.data, key_structure->mackey.len);
+            field = textsecure_SessionStructure_Chain_MessageKey_macKey(key_structure);
+            if(textsecure_SessionStructure_Chain_MessageKey_has_macKey(key_structure)
+                    && field.size == sizeof(node->message_key.mac_key)) {
+                memcpy(node->message_key.mac_key, field.data, field.size);
             }
-            if(key_structure->has_iv && key_structure->iv.len == sizeof(node->message_key.iv)) {
-                memcpy(node->message_key.iv, key_structure->iv.data, key_structure->iv.len);
+            field = textsecure_SessionStructure_Chain_MessageKey_iv(key_structure);
+            if(textsecure_SessionStructure_Chain_MessageKey_has_iv(key_structure)
+                    && field.size == sizeof(node->message_key.iv)) {
+                memcpy(node->message_key.iv, field.data, field.size);
             }
 
             DL_APPEND(message_keys_head, node);
