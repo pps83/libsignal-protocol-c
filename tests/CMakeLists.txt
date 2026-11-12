@@ -1,11 +1,9 @@
 enable_testing()
 find_library(M_LIB m)
-find_package(Check 0.9.10 REQUIRED)
 IF(NOT(APPLE AND ${CMAKE_SYSTEM_NAME} MATCHES "Darwin"))
   find_package(OpenSSL 1.0 REQUIRED)
 ENDIF()
 find_package(Threads)
-include_directories(${CHECK_INCLUDE_DIRS})
 
 IF(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
   SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-function")
@@ -32,7 +30,6 @@ endif()
 
 set(LIBS ${LIBS}
 	${M_LIB}
-	${CHECK_LDFLAGS}
 	${OPENSSL_LIBRARIES}
 	${CMAKE_THREAD_LIBS_INIT}
 	${CMAKE_DL_LIBS}
@@ -40,6 +37,8 @@ set(LIBS ${LIBS}
 )
 
 set(common_SRCS
+	check.c
+	check.h
 	test_common.c
 	test_common.h
 )
